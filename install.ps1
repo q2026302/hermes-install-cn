@@ -1,17 +1,21 @@
 # ============================================================================
 # Hermes Agent 国内在线安装脚本
 #
-# 镜像加速策略（多级回退）：
-#   1. 国内直连镜像 — npmmirror（npm/Node/Electron/Playwright）
-#                          清华 PyPI（pip 回退）
-#                          winget CDN（Git、ffmpeg）
-#   2. GitHub 代理链  — ghfast.top → ghproxy.com（uv、源码等）
+# 镜像加速策略：
+#   国内镜像直连 — 以下工具走国内 CDN/镜像站（不经过任何代理）：
+#     npmmirror: npm 包 / Node.js / Electron / Playwright
+#     清华 mirrors: Git for Windows
+#     aliyun / 清华 PyPI: pip 依赖
+#   GitHub 代理连 — 以下工具走自动回退代理链：
+#     uv / Python 运行时 / Hermes 源码 / ffmpeg
+#     链: ghfast.top → ghproxy.com → 直连(try)
 # ============================================================================
 param(
     [string]$NpmRegistry = "https://registry.npmmirror.com",
     [string]$NodeMirror = "https://npmmirror.com/mirrors/node/",
     [string]$ElectronMirror = "https://npmmirror.com/mirrors/electron/",
     [string]$PlaywrightHost = "https://npmmirror.com/mirrors/playwright/",
+    [string]$GitMirror = "https://mirrors.tuna.tsinghua.edu.cn/git-for-windows/",
     [string]$PypiMirror = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
     [string]$Proxy = ""
 )
@@ -19,7 +23,6 @@ param(
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# 用户主动指定代理（如 Shadowsocks/V2Ray 客户端）
 if ($Proxy) { $env:HTTP_PROXY = $Proxy; $env:HTTPS_PROXY = $Proxy }
 
 # ============================================================================
@@ -31,38 +34,36 @@ $env:ELECTRON_MIRROR = $ElectronMirror
 $env:PLAYWRIGHT_DOWNLOAD_HOST = $PlaywrightHost
 
 # ============================================================================
-# GitHub 代理链（多级回退）
+# GitHub 代理链（国内可访问的 GitHub 反向代理，按优先级排列）
 # ============================================================================
-$GitHubProxies = @("https://ghfast.top/", "https://ghproxy.com/")
+$GitHubProxies = @(
+    "https://ghfast.top/"
+    "https://ghproxy.com/"
+)
 
 # ============================================================================
 # 工具函数
 # ============================================================================
 function Has-Command($name) { Get-Command $name -ErrorAction SilentlyContinue }
-function Write-Step($msg) { Write-Host "-> $msg" -ForegroundColor Cyan }
-function Write-OK($msg) { Write-Host "  [OK] $msg" -ForegroundColor Green }
-function Write-Warn($msg) { Write-Host "  [!] $msg" -ForegroundColor Yellow }
-function Write-Err($msg) { Write-Host "  [X] $msg" -ForegroundColor Red }
+function Write-Step($m) { Write-Host "-> $m" -ForegroundColor Cyan }
+function Write-OK($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
+function Write-Warn($m) { Write-Host "  [!] $m" -ForegroundColor Yellow }
+function Write-Err($m) { Write-Host "  [X] $m" -ForegroundColor Red }
 
-# 通过代理链下载文件（直连 → ghfast.top → ghproxy.com）
+# 通过代理链下载文件（直连try → ghfast → ghproxy → 失败）
 function Invoke-ProxyDownload {
     param([string]$Url, [string]$OutFile, [int]$TimeoutSec = 120)
-    # 先直连（部分镜像站可直连）
-    foreach ($prefix in ("", $GitHubProxies)) {
-        $target = if ($prefix) { "${prefix}${Url}" } else { $Url }
-        if (-not $prefix -and $target -eq $Url -and $Url -match '^https?://') {
-            # 尝试直连
-            $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            try { Invoke-RestMethod -Uri $Url -OutFile $OutFile -TimeoutSec $TimeoutSec -ErrorAction Stop; return $true }
-            catch {} finally { $ErrorActionPreference = $prev }
-        } elseif ($prefix) {
-            # 尝试代理
-            $short = ($target -replace 'https://', '').Substring(0, [Math]::Min(60, ($target -replace 'https://', '').Length))
-            Write-Step "  代理: ${short}..."
-            $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            try { Invoke-RestMethod -Uri $target -OutFile $OutFile -TimeoutSec $TimeoutSec -ErrorAction Stop; return $true }
-            catch { Write-Warn "  失效，换一个" } finally { $ErrorActionPreference = $prev }
-        }
+    # 全部尝试路径：直连 → 各代理
+    $attempts = @($Url)
+    foreach ($p in $GitHubProxies) { $attempts += "${p}${Url}" }
+    foreach ($target in $attempts) {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        $short = ($target -replace '^https?://', '').Substring(0, [Math]::Min(60, ($target -replace '^https?://', '').Length))
+        try {
+            Invoke-RestMethod -Uri $target -OutFile $OutFile -TimeoutSec $TimeoutSec -ErrorAction Stop
+            if ($target -ne $Url) { Write-Step "  代理: ${short}..." }
+            return $true
+        } catch {} finally { $ErrorActionPreference = $prev }
     }
     return $false
 }
@@ -70,8 +71,7 @@ function Invoke-ProxyDownload {
 # 通过代理链获取文本内容
 function Invoke-ProxyText {
     param([string]$Url, [int]$TimeoutSec = 60)
-    foreach ($prefix in ("", $GitHubProxies)) {
-        $target = if ($prefix) { "${prefix}${Url}" } else { $Url }
+    foreach ($target in @($Url; ($GitHubProxies | ForEach-Object { "${_}${Url}" }))) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         try { $r = Invoke-RestMethod -Uri $target -TimeoutSec $TimeoutSec -ErrorAction Stop; if ($r) { return $r } }
         catch {} finally { $ErrorActionPreference = $prev }
@@ -81,79 +81,118 @@ function Invoke-ProxyText {
 
 Write-Host "`n+-------------------------------------------------------+" -ForegroundColor Magenta
 Write-Host "|   Hermes Agent · 国内安装                            |" -ForegroundColor Magenta
-Write-Host "|   国内镜像直连: npm / Node / Electron / Playwright    |" -ForegroundColor Magenta
-Write-Host "|   winget CDN:   Git / ffmpeg                         |" -ForegroundColor Magenta
-Write-Host "|   GitHub 代理:  ghfast.top → ghproxy.com             |" -ForegroundColor Magenta
 Write-Host "+-------------------------------------------------------+" -ForegroundColor Magenta
+Write-Host "  镜像: npm/Node/Electron/Playwright → npmmirror   " -ForegroundColor Cyan
+Write-Host "  镜像: Git for Windows              → 清华 mirrors " -ForegroundColor Cyan
+Write-Host "  镜像: PyPI                        → 清华 tuna     " -ForegroundColor Cyan
+Write-Host "  代理: GitHub 资源                  → ghfast/ghproxy" -ForegroundColor Cyan
+Write-Host ""
 
 $hermesBin = "$env:LOCALAPPDATA\hermes\bin"
 New-Item -ItemType Directory -Force -Path $hermesBin | Out-Null
+$env:Path = "${hermesBin};${env:Path}"
 
 # ============================================================================
-# 1. uv 包管理器（GitHub → 代理链）
+# 1. uv 包管理器
 # ============================================================================
 if (Has-Command uv) {
     Write-OK "已有 uv $((uv --version 2>$null))"
 } else {
-    Write-Step "安装 uv（代理链）..."
+    Write-Step "下载 uv（代理链）..."
     $arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
     $url = "https://github.com/astral-sh/uv/releases/latest/download/uv-${arch}-pc-windows-msvc.zip"
     $zip = "$env:TEMP\uv.zip"
-
     if (Invoke-ProxyDownload -Url $url -OutFile $zip -TimeoutSec 120) {
         Expand-Archive $zip $hermesBin -Force; Remove-Item $zip -Force
-        # uv zip 内可能带子目录
-        if (Test-Path "$hermesBin\uv-${arch}-pc-windows-msvc\uv.exe") {
-            Move-Item "$hermesBin\uv-${arch}-pc-windows-msvc\uv.exe" "$hermesBin\uv.exe" -Force
-            Remove-Item "$hermesBin\uv-${arch}-pc-windows-msvc" -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        if (-not (Test-Path "$hermesBin\uv.exe")) {
+        # uv 压缩包内可能带子目录
+        $sub = "$hermesBin\uv-${arch}-pc-windows-msvc"
+        if (Test-Path "$sub\uv.exe") { Move-Item "$sub\uv.exe" "$hermesBin\uv.exe" -Force; Remove-Item $sub -Recurse -Force -ErrorAction SilentlyContinue }
+        elseif (-not (Test-Path "$hermesBin\uv.exe")) {
             $f = Get-ChildItem "$hermesBin\*.exe" -Recurse | Select-Object -First 1
             if ($f) { Copy-Item $f.FullName "$hermesBin\uv.exe" -Force }
         }
-    } else {
-        Write-Warn "uv 下载失败，Hermes 内置安装将尝试"
-    }
-    $env:Path = "${hermesBin};${env:Path}"
+    } else { Write-Warn "uv 下载失败，Hermes 内置安装会尝试" }
     if (Has-Command uv) { Write-OK "uv $((uv --version 2>$null))" }
 }
 
-# Python 运行时由 uv 通过代理链下载
+# Python 由 uv 管理，设置镜像（走代理链）
 $env:UV_PYTHON_INSTALL_MIRROR = "${GitHubProxies[0]}https://github.com/astral-sh/python-build-standalone/releases/download"
 
 # ============================================================================
-# 2. Git（winget CDN 直连 → 代理链备选）
+# 2. Git（清华镜像 → 代理链备选）
 # ============================================================================
 if (Has-Command git) {
     Write-OK "已有 Git $((git --version 2>$null))"
 } else {
-    Write-Step "安装 Git（winget CDN）..."
+    Write-Step "下载 Git（清华镜像）..."
     $ok = $false
+
+    # 清华镜像：先获取最新版本号，再拼出下载链接
+    # 清华 git-for-windows 镜像结构：https://mirrors.tuna.tsinghua.edu.cn/git-for-windows/v2.48.1.windows.1/PortableGit-2.48.1-64-bit.7z.exe
+    # 先用 ghfast 获取最新版本信息
+    $verUrl = "https://github.com/git-for-windows/git/releases/latest"
+    $verRedirect = $null
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { $p = Start-Process winget -ArgumentList "install Git.Git --accept-source-agreements --accept-package-agreements" -Wait -PassThru -NoNewWindow; if ($p.ExitCode -eq 0) { $ok = $true } } catch {}
+    foreach ($t in @($verUrl; ($GitHubProxies | ForEach-Object { "${_}${verUrl}" }))) {
+        try {
+            $req = [System.Net.WebRequest]::Create($t)
+            $req.AllowAutoRedirect = $false
+            $req.Timeout = 15000
+            $resp = $req.GetResponse()
+            if ($resp.StatusCode -eq [System.Net.HttpStatusCode]::Redirect -or $resp.StatusCode -eq [System.Net.HttpStatusCode]::MovedPermanently) {
+                $redirect = $resp.Headers["Location"]
+                if ($redirect -match 'tag/v?(\d+\.\d+\.\d+(\.\d+)?)') {
+                    $ver = $Matches[1]
+                    # 清华镜像 URL
+                    $gitUrl = "${GitMirror}v${ver}.windows.1/PortableGit-${ver}-64-bit.7z.exe"
+                    $zip = "$env:TEMP\git.zip"
+                    try {
+                        Invoke-RestMethod -Uri $gitUrl -OutFile $zip -TimeoutSec 300 -ErrorAction Stop
+                        Expand-Archive $zip "$hermesBin\git" -Force; Remove-Item $zip -Force
+                        $env:Path = "$hermesBin\git\bin;${env:Path}"
+                        $ok = $true
+                        Write-OK "Git ${ver}（清华镜像）"
+                    } catch {
+                        Write-Warn "清华镜像下载 Git ${ver} 失败，走代理链"
+                    }
+                    break
+                }
+            }
+            $resp.Close()
+        } catch {}
+    }
     $ErrorActionPreference = $prev
 
+    # 清华镜像失败 → 代理链下载 portable git
     if (-not $ok) {
-        Write-Warn "winget 失败，尝试便携版（代理链）..."
+        Write-Step "Git 尝试代理链..."
         $url = "https://github.com/git-for-windows/git/releases/latest/download/PortableGit-2.48.1-64-bit.7z.exe"
         $zip = "$env:TEMP\git.zip"
         if (Invoke-ProxyDownload -Url $url -OutFile $zip -TimeoutSec 300) {
             Expand-Archive $zip "$hermesBin\git" -Force; Remove-Item $zip -Force
             $env:Path = "$hermesBin\git\bin;${env:Path}"
-            if (Has-Command git) { $ok = $true }
+            if (Has-Command git) { $ok = $true; Write-OK "Git（代理链）" }
         }
     }
-    if ($ok) { Write-OK "Git" } else { Write-Warn "Git 安装受阻，Hermes 内置安装将尝试" }
+    if (-not $ok) { Write-Warn "Git 未能安装（Hermes 内置安装会尝试）" }
 }
 
 # ============================================================================
-# 3. ffmpeg（winget CDN 直连，非必需，不阻断）
+# 3. ffmpeg（代理链下载，非必需不阻断）
 # ============================================================================
 if (-not (Has-Command ffmpeg)) {
-    Write-Step "安装 ffmpeg（winget CDN）..."
-    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { $p = Start-Process winget -ArgumentList "install ffmpeg --accept-source-agreements --accept-package-agreements" -Wait -PassThru -NoNewWindow; if ($p.ExitCode -eq 0) { Write-OK "ffmpeg" } else { Write-Warn "跳过 ffmpeg（不影响核心功能）" } } catch { Write-Warn "跳过 ffmpeg（不影响核心功能）" }
-    $ErrorActionPreference = $prev
+    Write-Step "下载 ffmpeg（代理链）..."
+    $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+    $zip = "$env:TEMP\ffmpeg.zip"
+    if (Invoke-ProxyDownload -Url $url -OutFile $zip -TimeoutSec 300) {
+        Expand-Archive $zip "$env:TEMP\ffmpeg-extract" -Force; Remove-Item $zip -Force
+        New-Item "$hermesBin\ffmpeg" -ItemType Directory -Force | Out-Null
+        $exe = Get-ChildItem "$env:TEMP\ffmpeg-extract" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+        if ($exe) { Copy-Item $exe.FullName "$hermesBin\ffmpeg\ffmpeg.exe" -Force }
+        Remove-Item "$env:TEMP\ffmpeg-extract" -Recurse -Force -ErrorAction SilentlyContinue
+        $env:Path = "$hermesBin\ffmpeg;${env:Path}"
+        Write-OK "ffmpeg"
+    } else { Write-Warn "跳过 ffmpeg（不影响核心功能）" }
 } else { Write-OK "已有 ffmpeg" }
 
 # ============================================================================
@@ -165,18 +204,23 @@ $script = Invoke-ProxyText -Url $scriptUrl -TimeoutSec 60
 
 if (-not $script) {
     Write-Err "无法下载 Hermes 安装脚本。请检查网络或使用离线安装包。"
+    Write-Host "  离线包下载：百度网盘（待上传）" -ForegroundColor Yellow
     exit 1
 }
 
-# 修补：git clone 走代理链
+# 脚本修补：GitHub 地址全走代理链
 $script = $script -replace 'https://github\.com/', "${GitHubProxies[0]}https://github.com/"
 
-# 跳过已预装的步骤
-$script = $script -replace 'if \(-not \(Install-Uv\)\)\s*\{ throw "uv installation failed" \}',
-    'Write-Host "[OK] uv" -ForegroundColor Green'
-$script = $script -replace 'Install-Git\b', '{ Write-Host "[OK] git" } function _g{}'
-$script = $script -replace 'Install-SystemPackages\b', '{ Write-Host "[OK] system pkgs" } function _sp{}'
-$script = $script -replace 'winget install [^\n]*ffmpeg[^\n]*', 'Write-Host "[OK] ffmpeg"'
+# 跳过已预装的步骤（防止重复安装出错）
+$script = $script -replace 'if \(-not \(Install-Uv\)\)\s*\{\s*throw "uv installation failed"\s*\}',
+    'Write-Host "[OK] uv ready"'
+$script = $script -replace 'Install-Git\b', '{ Write-Host "[OK] git ready" } function _git_skip{}'
+$script = $script -replace 'Install-SystemPackages\b', '{ Write-Host "[OK] system pkgs ready" } function _sp_skip{}'
+$script = $script -replace 'winget install [^\n]*ffmpeg[^\n]*',
+    'Write-Host "[OK] ffmpeg handled"'
+
+# uv 的 Python 安装走镜像
+$env:UV_PYTHON_INSTALL_MIRROR = "${GitHubProxies[0]}https://github.com/astral-sh/python-build-standalone/releases/download"
 
 Write-Step "安装 Hermes 本体（镜像加速，约 5-15 分钟）..."
 Invoke-Expression $script
@@ -186,5 +230,5 @@ Write-Host "  安装完成！" -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Green
 Write-Host "  1. 重启终端（让 PATH 生效）" -ForegroundColor Cyan
 Write-Host "  2. 输入 hermes 启动" -ForegroundColor Cyan
-Write-Host "  3. 首次使用: hermes setup 配置模型" -ForegroundColor Cyan
+Write-Host "  3. 首次使用: hermes setup 配置 API Key" -ForegroundColor Cyan
 Write-Host "=========================================================" -ForegroundColor Green
