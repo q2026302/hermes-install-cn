@@ -13,34 +13,37 @@
 
 | 方式 | 说明 | 适用场景 |
 |------|------|----------|
-| **在线安装** | 一行命令，所有依赖从国内镜像加速下载 | 有网但 GitHub 直连慢 |
+| **在线安装** | 一行命令，依赖从国内镜像+代理链加速下载 | 有网但 GitHub 直连慢 |
 | **离线安装** | 下载离线包 → 解压 → 运行，全程 0 网络 | 内网/无网络/网络极差 |
 
 ---
 
 ## 🚀 在线安装
 
-### 方法一：直接运行（推荐）
-
 ```powershell
-irm https://gitee.com/你的用户名/hermes-install-cn/raw/main/install.ps1 | iex
+irm https://gitee.com/q2026302/hermes-install-cn/raw/main/install.ps1 | iex
 ```
 
-### 方法二：下载后运行
+或下载 `install.ps1` 后本地运行：
 
 ```powershell
-# 保存 install.ps1 到本地，右键 → 用 PowerShell 运行
 .\install.ps1
 ```
 
-### 方法三：有代理客户端
+安装过程 5-15 分钟，完成后重启终端，输入 `hermes` 即可使用。
 
-```powershell
-.\install.ps1 -Proxy "http://127.0.0.1:7890"
-```
+### 镜像加速策略
 
-> 安装过程 5-15 分钟，取决于网络和机器性能。
-> 安装完成后重启终端，输入 `hermes` 即可使用。
+| 组件 | 来源 | 说明 |
+|------|------|------|
+| npm 包 | `registry.npmmirror.com` | 淘宝 npm 镜像，直连 |
+| Node.js | `npmmirror.com/mirrors/node/` | 淘宝 Node 镜像，直连 |
+| Electron | `npmmirror.com/mirrors/electron/` | 淘宝 Electron 镜像，直连 |
+| Playwright | `npmmirror.com/mirrors/playwright/` | 淘宝 Playwright 镜像，直连 |
+| PyPI | `mirrors.tuna.tsinghua.edu.cn` | 清华 PyPI 镜像，直连 |
+| Git / ffmpeg | `winget` 安装 | winget CDN 国内直连 |
+| uv / Hermes 源码 | 代理链 `ghfast.top` → `ghproxy.com` | 多代理自动回退 |
+| Python 运行时 | uv 通过代理链下载 | 同上 |
 
 ---
 
@@ -48,22 +51,9 @@ irm https://gitee.com/你的用户名/hermes-install-cn/raw/main/install.ps1 | i
 
 适合无网络环境或反复安装的场景。
 
-### 下载离线包
+下载离线包 → 解压 → 运行 `install-offline.ps1`，全程不需要联网。
 
-| 渠道 | 链接 |
-|------|------|
-| Gitee Releases | [releases](https://gitee.com/你的用户名/hermes-install-cn/releases) |
-| 百度网盘 | 待上传（见下方提取码） |
-
-### 使用
-
-```powershell
-# 1. 下载 hermes-install-cn-v{hermes版本号}.zip
-# 2. 解压到任意目录
-# 3. 进入目录，运行：
-
-.\install-offline.ps1
-```
+离线包下载（百度网盘）：*待上传*
 
 ---
 
@@ -71,54 +61,22 @@ irm https://gitee.com/你的用户名/hermes-install-cn/raw/main/install.ps1 | i
 
 ```
 hermes-install-cn/
-├── install.ps1              # 在线安装（镜像加速）
-├── install-offline.ps1      # 离线安装（包内使用）
-├── build-package.ps1        # 打包脚本（生成离线安装包）
+├── install.ps1              # 在线安装脚本
+├── install-offline.ps1      # 离线安装脚本（包内使用）
+├── build-package.ps1        # 打包脚本
 ├── packages/                # 离线包输出目录
-│   └── hermes-install-cn-v*.zip
-├── LICENSE                  # MIT
+├── LICENSE
 └── README.md
 ```
 
 ---
 
-## 🔖 版本说明
+## 🔖 版本
 
-离线包的版本号与对应的 Hermes 版本一致：
-
-| 离线包 | 内含 Hermes 版本 | 说明 |
-|--------|------------------|------|
-| `hermes-install-cn-v2.3.0.zip` | Hermes v2.3.0 | 最新版 |
-| `hermes-install-cn-v0.19.0.zip` | Hermes v0.19.0 | 旧版 |
-
-安装脚本（install.ps1）始终从镜像拉取**最新版** Hermes。
-如需固定版本，请使用对应版本的离线包。
-
----
-
-## 🧰 构建离线包
-
-```powershell
-# 在一台能联网的机器上运行
-.\build-package.ps1
-```
-
-会自动下载：
-- uv 包管理器
-- Python 3.11
-- Git
-- Node.js
-- ffmpeg
-- Hermes 源码
-- 所有 Python 依赖（wheels）
-- 所有 Node 依赖（npm cache）
-
-输出到 `packages/hermes-install-cn-v{版本号}.zip`。
+离线包文件名格式：`hermes-install-cn-v{hermes版本号}.zip`
 
 ---
 
 ## 📜 许可证
 
-[MIT](LICENSE)
-
-Based on [Hermes Agent](https://github.com/NousResearch/hermes-agent) (MIT) by Nous Research.
+[MIT](LICENSE) · Based on [Hermes Agent](https://github.com/NousResearch/hermes-agent) (MIT) by Nous Research
