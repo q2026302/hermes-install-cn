@@ -75,6 +75,19 @@ function Invoke-WithMirror {
     return $false
 }
 
+# 包装原生命令（git/npm/uv）：PowerShell 5.1 在 EAP=Stop 下会把原生命令
+# 写入 stderr 的正常输出（git 的 "Cloning into..."、npm/uv 的进度信息）
+# 当成致命错误抛出。临时放宽 EAP，用返回的退出码判断真实成败。
+function Invoke-NativeChecked {
+    param([scriptblock]$ScriptBlock)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $ScriptBlock 2>$null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    return $code
+}
+
 # ============================================================================
 # 1. 下载 uv
 # ============================================================================
@@ -276,11 +289,11 @@ if (Test-Path "$hermesSrc\.git") {
 } else {
     if (Test-Path $hermesSrc) { Remove-Item $hermesSrc -Recurse -Force }
     # 先试直连，失败后才走代理。
-    git clone --depth 1 "https://github.com/NousResearch/hermes-agent.git" $hermesSrc 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        git clone --depth 1 "${Mirror}https://github.com/NousResearch/hermes-agent.git" $hermesSrc 2>$null
+    $cloneRc = Invoke-NativeChecked { git clone --depth 1 "https://github.com/NousResearch/hermes-agent.git" $hermesSrc }
+    if ($cloneRc -ne 0) {
+        $cloneRc = Invoke-NativeChecked { git clone --depth 1 "${Mirror}https://github.com/NousResearch/hermes-agent.git" $hermesSrc }
     }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$hermesSrc\pyproject.toml")) {
+    if ($cloneRc -ne 0 -or -not (Test-Path "$hermesSrc\pyproject.toml")) {
         Write-Host "  [X] Hermes 源码克隆失败，无法继续" -ForegroundColor Red
         exit 1
     }
@@ -307,8 +320,8 @@ if ($existingWheels.Count -gt 0) {
 } else {
 Push-Location $hermesSrc
 if (Test-Path "$uvDir\uv.exe") {
-    & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $venvRc = Invoke-NativeChecked { & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed }
+    if ($venvRc -ne 0) {
         Write-Host "  [X] Python 3.11 虚拟环境创建失败" -ForegroundColor Red
         Pop-Location
         exit 1
@@ -316,7 +329,7 @@ if (Test-Path "$uvDir\uv.exe") {
     $env:VIRTUAL_ENV = "$env:TEMP\hermes-venv"
     $env:Path = "$env:TEMP\hermes-venv\Scripts;${env:Path}"
     # 先试清华 PyPI 镜像（直连）
-    & "$uvDir\uv.exe" pip download -r requirements.txt --destination $wheelsDir --index-url $env:PIP_INDEX_URL 2>$null
+    Invoke-NativeChecked { & "$uvDir\uv.exe" pip download -r requirements.txt --destination $wheelsDir --index-url $env:PIP_INDEX_URL } | Out-Null
     if ((Get-ChildItem $wheelsDir -Filter "*.whl" | Measure-Object).Count -eq 0) {
         Write-Host "  [X] 从清华 PyPI 下载 Python 依赖失败" -ForegroundColor Red
         Pop-Location
@@ -347,7 +360,7 @@ if (Test-Path $pyInstallBase) {
 }
 if (-not $pyRuntimeDir) {
     # uv venv 已在上一步创建，理论上解释器必然存在；万一没有则尝试补装
-    & "$uvDir\uv.exe" python install 3.11 2>&1 | Out-Null
+    Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 } | Out-Null
     if (Test-Path $pyInstallBase) {
         $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" |
             Sort-Object Name -Descending | Select-Object -First 1
@@ -377,11 +390,11 @@ Push-Location $hermesSrc
 if (Test-Path "$nodeDir\node.exe") {
     $env:Path = "$nodeDir;${env:Path}"
 }
-npm install --prefer-offline --cache $npmCacheDir 2>$null
-if ($LASTEXITCODE -ne 0) {
-    npm install --cache $npmCacheDir 2>$null
+$npmRc = Invoke-NativeChecked { npm install --prefer-offline --cache $npmCacheDir }
+if ($npmRc -ne 0) {
+    $npmRc = Invoke-NativeChecked { npm install --cache $npmCacheDir }
 }
-if ($LASTEXITCODE -ne 0) {
+if ($npmRc -ne 0) {
     Write-Host "  [X] npm 依赖安装失败" -ForegroundColor Red
     exit 1
 }
