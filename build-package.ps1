@@ -191,6 +191,24 @@ try {
 } catch { Write-Host "  [!] ffmpeg 跳过" -ForegroundColor Yellow }
 
 # ============================================================================
+# 4b. 下载 ripgrep（与在线安装 Ensure-RgFfmpeg 保持一致）
+# ============================================================================
+Write-Host "-> 下载 ripgrep..." -ForegroundColor Cyan
+$rgDir = "$BuildDir\rg"
+try {
+    $rgArch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
+    $rgUrl = "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${rgArch}-pc-windows-msvc.zip"
+    if (Invoke-WithMirror -Url $rgUrl -OutFile "$env:TEMP\rg.zip" -TimeoutSec 180) {
+        Expand-Archive "$env:TEMP\rg.zip" "$env:TEMP\rg-extract" -Force
+        New-Item $rgDir -ItemType Directory -Force | Out-Null
+        $exe = Get-ChildItem "$env:TEMP\rg-extract" -Recurse -Filter "rg.exe" | Select-Object -First 1
+        if ($exe) { Copy-Item $exe.FullName "$rgDir\rg.exe" -Force }
+        Remove-Item "$env:TEMP\rg-extract" -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  [OK] ripgrep 14.1.1" -ForegroundColor Green
+    } else { Write-Host "  [!] ripgrep 下载失败" -ForegroundColor Yellow }
+} catch { Write-Host "  [!] ripgrep 跳过" -ForegroundColor Yellow }
+
+# ============================================================================
 # 5. 克隆 Hermes 源码 + 检测版本
 # ============================================================================
 Write-Host "-> [5/8] 克隆 Hermes 源码..." -ForegroundColor Cyan
@@ -246,6 +264,33 @@ $wheelCount = (Get-ChildItem $wheelsDir -Filter "*.whl" | Measure-Object).Count
 Write-Host "  [OK] $wheelCount wheels" -ForegroundColor Green
 
 # ============================================================================
+# 6b. 打包 Python 3.11 运行时（离线机器无法联网下载解释器）
+# ============================================================================
+Write-Host "-> 打包 Python 3.11 运行时..." -ForegroundColor Cyan
+$pyInstallBase = "$env:LOCALAPPDATA\uv\python"
+$pyRuntimeDir = $null
+if (Test-Path $pyInstallBase) {
+    $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" |
+        Sort-Object Name -Descending | Select-Object -First 1
+}
+if (-not $pyRuntimeDir) {
+    # uv venv 已在上一步创建，理论上解释器必然存在；万一没有则尝试补装
+    & "$uvDir\uv.exe" python install 3.11 2>&1 | Out-Null
+    if (Test-Path $pyInstallBase) {
+        $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" |
+            Sort-Object Name -Descending | Select-Object -First 1
+    }
+}
+if ($pyRuntimeDir) {
+    New-Item "$BuildDir\python" -ItemType Directory -Force | Out-Null
+    Copy-Item $pyRuntimeDir.FullName "$BuildDir\python\" -Recurse -Force
+    Write-Host "  [OK] Python 运行时 $($pyRuntimeDir.Name)" -ForegroundColor Green
+} else {
+    Write-Host "  [X] 未找到 uv 管理的 Python 3.11 运行时，离线包无法构建" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================================
 # 7. 下载 npm 缓存
 # ============================================================================
 Write-Host "-> [7/8] 下载 npm 依赖..." -ForegroundColor Cyan
@@ -280,6 +325,8 @@ Copy-Item "$BuildDir\bin" "$PkgDir\" -Recurse -Force
 if (Test-Path $gitDir) { Copy-Item $gitDir "$PkgDir\" -Recurse -Force }
 if (Test-Path $nodeDir) { Copy-Item $nodeDir "$PkgDir\" -Recurse -Force }
 if (Test-Path $ffmpegDir) { Copy-Item $ffmpegDir "$PkgDir\" -Recurse -Force }
+if (Test-Path $rgDir) { Copy-Item $rgDir "$PkgDir\" -Recurse -Force }
+if (Test-Path "$BuildDir\python") { Copy-Item "$BuildDir\python" "$PkgDir\" -Recurse -Force }
 
 # 复制 Hermes 源码
 Copy-Item $hermesSrc "$PkgDir\hermes-agent" -Recurse -Force
@@ -360,6 +407,22 @@ if (Test-Path "$OfflineDir\node\node.exe") {
     Write-Host "  [OK] Node.js" -ForegroundColor Green
 }
 
+# 3b. ripgrep
+if (Test-Path "$OfflineDir\rg\rg.exe") {
+    New-Item "$hermesBin\rg" -ItemType Directory -Force | Out-Null
+    Copy-Item "$OfflineDir\rg\rg.exe" "$hermesBin\rg\rg.exe" -Force
+    $env:Path = "$hermesBin\rg;${env:Path}"
+    Write-Host "  [OK] ripgrep" -ForegroundColor Green
+}
+
+# 3c. Python 3.11 运行时（放到 uv 默认 Python 安装目录，uv 自动发现）
+if (Test-Path "$OfflineDir\python") {
+    $uvPythonDir = "$env:LOCALAPPDATA\uv\python"
+    New-Item -ItemType Directory -Force -Path $uvPythonDir | Out-Null
+    Copy-Item "$OfflineDir\python\*" $uvPythonDir -Recurse -Force
+    Write-Host "  [OK] Python 3.11 运行时" -ForegroundColor Green
+}
+
 # 4. ffmpeg
 if (Test-Path "$OfflineDir\ffmpeg\ffmpeg.exe") {
     $env:Path = "$OfflineDir\ffmpeg;${env:Path}"
@@ -375,6 +438,10 @@ Write-Host "  [OK]" -ForegroundColor Green
 Push-Location "$hermesHome\hermes-agent"
 Write-Host "-> 创建 Python 虚拟环境..." -ForegroundColor Cyan
 uv venv --python 3.11 --python-preference only-managed 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [X] Python 虚拟环境创建失败（缺少 Python 3.11 运行时？）" -ForegroundColor Red
+    exit 1
+}
 $env:VIRTUAL_ENV = "$hermesHome\hermes-agent\.venv"
 $env:Path = "$hermesHome\hermes-agent\.venv\Scripts;${env:Path}"
 Write-Host "  [OK]" -ForegroundColor Green

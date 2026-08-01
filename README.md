@@ -75,7 +75,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 输出目录：`packages/`，文件名为 `hermes-install-cn-v{版本号}.zip`。
 
-打包内容：uv、完整 PortableGit（含 Git Bash）、Node.js、ffmpeg、Hermes 源码、Python wheels（清华 PyPI）、npm cache。
+打包内容：uv、完整 PortableGit（含 Git Bash）、Node.js、ripgrep、ffmpeg、**Python 3.11 运行时**、Hermes 源码、Python wheels（清华 PyPI）、npm cache。
 
 ### 2. 离线安装（目标机器）
 
