@@ -13,37 +13,52 @@
 
 | 方式 | 说明 | 适用场景 |
 |------|------|----------|
-| **在线安装** | 一行命令，依赖从国内镜像+代理链加速下载 | 有网但 GitHub 直连慢 |
-| **离线安装** | 下载离线包 → 解压 → 运行，全程 0 网络 | 内网/无网络/网络极差 |
+| **在线安装** | 一键脚本，依赖全部走国内镜像 + GitHub 代理 | 有网但 GitHub 直连慢/失败 |
+| **离线安装** | 打包脚本生成离线包 → 解压 → 运行，全程 0 网络 | 内网/无网络/反复安装 |
 
 ---
 
 ## 🚀 在线安装
 
-```powershell
-irm https://gitee.com/q2026302/hermes-install-cn/raw/main/install.ps1 | iex
-```
-
-或下载 `install.ps1` 后本地运行：
+下载 `install.ps1` 后，在 PowerShell 中运行：
 
 ```powershell
+# 允许执行脚本（当前进程临时放开）
+Set-ExecutionPolicy -Scope Process Bypass
+
+# 方式一：下载后本地运行（推荐，国内可达）
 .\install.ps1
+
+# 方式二：直接一行执行（需要能访问 raw.githubusercontent.com）
+irm https://raw.githubusercontent.com/q2026302/hermes-install-cn/master/install.ps1 | iex
 ```
 
-安装过程 5-15 分钟，完成后重启终端，输入 `hermes` 即可使用。
+安装过程 5-15 分钟，完成后**重启终端**，输入 `hermes` 即可使用。
 
-### 镜像加速策略
+### 安装器做了什么
 
-| 组件 | 来源 | 说明 |
-|------|------|------|
-| npm 包 | `registry.npmmirror.com` | 淘宝 npm 镜像，直连 |
-| Node.js | `npmmirror.com/mirrors/node/` | 淘宝 Node 镜像，直连 |
-| Electron | `npmmirror.com/mirrors/electron/` | 淘宝 Electron 镜像，直连 |
-| Playwright | `npmmirror.com/mirrors/playwright/` | 淘宝 Playwright 镜像，直连 |
-| PyPI | `mirrors.tuna.tsinghua.edu.cn` | 清华 PyPI 镜像，直连 |
-| Git / ffmpeg | `winget` 安装 | winget CDN 国内直连 |
-| uv / Hermes 源码 | 代理链 `ghfast.top` → `ghproxy.com` | 多代理自动回退 |
-| Python 运行时 | uv 通过代理链下载 | 同上 |
+在线安装器先准备好全部依赖，再原样调用 Hermes 官方安装脚本（不修改官方逻辑），官方脚本检测到依赖已就绪后直接复用：
+
+| 组件 | 准备方式 | 说明 |
+|------|----------|------|
+| uv | GitHub 代理链下载 | 官方脚本复用 |
+| Python 3.11 | `uv python install 3.11` | 官方脚本复用 |
+| PortableGit + Git Bash | 清华镜像下载，自解压 | 完整版，含 bash/awk/sed，官方脚本复用 |
+| Node.js 22 | npmmirror 镜像（index.json 解析真实版本） | 官方脚本复用 |
+| Hermes 源码 | ghfast.top → gh-proxy.com HTTPS 预克隆 | 保留完整 Git 历史，官方脚本进入更新分支 |
+| ripgrep / ffmpeg | GitHub 代理链预装 | 官方脚本检测到后跳过 winget |
+| npm / PyPI / uv 索引 | 镜像环境变量（当前进程 + 用户级持久化） | 后续 `hermes update` 等继续生效 |
+
+### 镜像与网络策略
+
+| 资源 | 来源 |
+|------|------|
+| npm 包 / Node.js / Electron / Playwright | `npmmirror.com`（直连） |
+| PyPI / uv 包索引 | `mirrors.tuna.tsinghua.edu.cn`（直连） |
+| PortableGit | 清华 GitHub Release 镜像（直连） |
+| GitHub Releases / 源码 clone | 直连优先 → `ghfast.top` → `gh-proxy.com` 回退 |
+
+GitHub 代理仅作为直连失败后的兜底，不改变官方脚本的仓库结构。
 
 ---
 
@@ -51,9 +66,20 @@ irm https://gitee.com/q2026302/hermes-install-cn/raw/main/install.ps1 | iex
 
 适合无网络环境或反复安装的场景。
 
-下载离线包 → 解压 → 运行 `install-offline.ps1`，全程不需要联网。
+### 1. 生成离线包（在一台能联网的 Windows 机器上）
 
-离线包下载（百度网盘）：*待上传*
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\build-package.ps1
+```
+
+输出目录：`packages/`，文件名为 `hermes-install-cn-v{版本号}.zip`。
+
+打包内容：uv、完整 PortableGit（含 Git Bash）、Node.js、ffmpeg、Hermes 源码、Python wheels（清华 PyPI）、npm cache。
+
+### 2. 离线安装（目标机器）
+
+解压离线包 → 运行包内 `install-offline.ps1`，全程不需要联网。
 
 ---
 
@@ -61,9 +87,9 @@ irm https://gitee.com/q2026302/hermes-install-cn/raw/main/install.ps1 | iex
 
 ```
 hermes-install-cn/
-├── install.ps1              # 在线安装脚本
-├── install-offline.ps1      # 离线安装脚本（包内使用）
-├── build-package.ps1        # 打包脚本
+├── install.ps1              # 在线安装脚本（预装依赖 → 原样执行官方脚本）
+├── install-offline.ps1      # 离线安装脚本（打包时内嵌生成）
+├── build-package.ps1        # 离线包构建脚本
 ├── packages/                # 离线包输出目录
 ├── LICENSE
 └── README.md
@@ -73,7 +99,7 @@ hermes-install-cn/
 
 ## 🔖 版本
 
-离线包文件名格式：`hermes-install-cn-v{hermes版本号}.zip`
+在线安装始终获取 Hermes 最新 main 分支；离线包文件名带 Hermes 版本号：`hermes-install-cn-v{hermes版本号}.zip`。
 
 ---
 
