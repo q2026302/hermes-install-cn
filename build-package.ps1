@@ -3,12 +3,16 @@
 # 在一台能联网的 Windows 机器上运行，自动生成离线安装包
 # 用法: .\build-package.ps1
 #
+# 增量构建：已下载的组件缓存在 cache\build\ 下，重复运行或网络中断后
+# 重跑会自动复用已有成果，只补缺失部分。加 -Force 强制全量重建。
+#
 # 镜像加速策略：
 #   直连优先：清华镜像(npmmirror)下载 Node.js/npm
 #   代理备用：GitHub Releases(uv/ffmpeg)走 gh-proxy
 #   git clone Hermes 源码先直连，失败后走代理
 # ============================================================================
 param(
+    [switch]$Force,
     [string]$Mirror = "https://gh-proxy.com/",
     [string]$NpmRegistry = "https://registry.npmmirror.com",
     [string]$NodeMirror = "https://npmmirror.com/mirrors/node/",
@@ -32,10 +36,16 @@ $env:UV_DEFAULT_INDEX = $env:PIP_INDEX_URL
 $env:UV_INDEX_URL = $env:PIP_INDEX_URL
 
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BuildDir = "$env:TEMP\hermes-build"
+# 固定缓存目录（不再使用 TEMP）：断点续建、复用已有下载成果
+$BuildDir = "$RootDir\cache\build"
 $OutputDir = "$RootDir\packages"
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+
+if ($Force) {
+    Write-Host "  [ -Force ] 清空构建缓存，全量重建..." -ForegroundColor Yellow
+    Get-ChildItem $BuildDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "`n+-------------------------------------------------------+" -ForegroundColor Magenta
 Write-Host "|   Hermes 离线安装包构建工具                           |" -ForegroundColor Magenta
@@ -43,6 +53,7 @@ Write-Host "+-------------------------------------------------------+" -Foregrou
 Write-Host "  镜像: npm/Node → npmmirror" -ForegroundColor Cyan
 Write-Host "  镜像: Git for Windows → 清华 mirrors" -ForegroundColor Cyan
 Write-Host "  代理: uv/ffmpeg/Hermes源码 → ${Mirror}" -ForegroundColor Cyan
+Write-Host "  缓存: $BuildDir （已有组件自动复用）" -ForegroundColor DarkGray
 Write-Host ""
 
 # ============================================================================
@@ -71,27 +82,40 @@ Write-Host "-> [1/8] 下载 uv..." -ForegroundColor Cyan
 $arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
 $uvDir = "$BuildDir\bin"
 New-Item -ItemType Directory -Force -Path $uvDir | Out-Null
-$uvUrl = "https://github.com/astral-sh/uv/releases/latest/download/uv-${arch}-pc-windows-msvc.zip"
-if (Invoke-WithMirror -Url $uvUrl -OutFile "$env:TEMP\uv.zip" -TimeoutSec 120) {
-    Expand-Archive "$env:TEMP\uv.zip" $uvDir -Force
-    if (Test-Path "$uvDir\uv-${arch}-pc-windows-msvc\uv.exe") {
-        Move-Item "$uvDir\uv-${arch}-pc-windows-msvc\uv.exe" "$uvDir\uv.exe" -Force
-        Remove-Item "$uvDir\uv-${arch}-pc-windows-msvc" -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    $env:Path = "${uvDir};${env:Path}"
-    $uvVer = & "$uvDir\uv.exe" --version 2>$null
-    Write-Host "  [OK] $uvVer" -ForegroundColor Green
+if (Test-Path "$uvDir\uv.exe") {
+    Write-Host "  [OK] 已有 uv $((& "$uvDir\uv.exe" --version 2>$null))，跳过下载" -ForegroundColor Green
 } else {
-    Write-Host "  [X] uv 下载失败，离线包无法构建（uv 是核心依赖）" -ForegroundColor Red
-    exit 1
+    $uvUrl = "https://github.com/astral-sh/uv/releases/latest/download/uv-${arch}-pc-windows-msvc.zip"
+    if (Invoke-WithMirror -Url $uvUrl -OutFile "$env:TEMP\uv.zip" -TimeoutSec 120) {
+        Expand-Archive "$env:TEMP\uv.zip" $uvDir -Force
+        if (Test-Path "$uvDir\uv-${arch}-pc-windows-msvc\uv.exe") {
+            Move-Item "$uvDir\uv-${arch}-pc-windows-msvc\uv.exe" "$uvDir\uv.exe" -Force
+            Remove-Item "$uvDir\uv-${arch}-pc-windows-msvc" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item "$env:TEMP\uv.zip" -Force -ErrorAction SilentlyContinue
+        $uvVer = & "$uvDir\uv.exe" --version 2>$null
+        Write-Host "  [OK] $uvVer" -ForegroundColor Green
+    } else {
+        Write-Host "  [X] uv 下载失败，离线包无法构建（uv 是核心依赖）" -ForegroundColor Red
+        exit 1
+    }
 }
+$env:Path = "${uvDir};${env:Path}"
 
 # ============================================================================
 # 2. 下载 Portable Git
 # ============================================================================
 Write-Host "-> [2/8] 下载 Git..." -ForegroundColor Cyan
 $gitDir = "$BuildDir\git"
-try {
+$gitCachedOk = $false
+if ((Test-Path "$gitDir\cmd\git.exe") -and (Test-Path "$gitDir\bin\bash.exe")) {
+    $env:Path = "$gitDir\cmd;$gitDir\bin;$gitDir\usr\bin;${env:Path}"
+    & "$gitDir\bin\bash.exe" -lc "printf hermes-git-bash-ok" | Out-Null
+    if ($LASTEXITCODE -eq 0) { $gitCachedOk = $true }
+}
+if (-not $gitCachedOk) {
+    if (Test-Path $gitDir) { Remove-Item $gitDir -Recurse -Force -ErrorAction SilentlyContinue }
+    try {
     $gitIndexUrl = "${GitMirror}LatestRelease/"
     $page = Invoke-RestMethod -Uri $gitIndexUrl -TimeoutSec 30 -ErrorAction Stop
     $assets = [regex]::Matches(
@@ -146,8 +170,11 @@ try {
         Write-Host "  [X] Git 安装失败，无法继续：$($_.Exception.Message)" -ForegroundColor Red
         exit 1
     }
-} finally {
-    if ($tmpGit) { Remove-Item $tmpGit -Force -ErrorAction SilentlyContinue }
+    } finally {
+        if ($tmpGit) { Remove-Item $tmpGit -Force -ErrorAction SilentlyContinue }
+    }
+} else {
+    Write-Host "  [OK] 已有 Git $((& "$gitDir\cmd\git.exe" --version 2>$null))，跳过下载" -ForegroundColor Green
 }
 
 # ============================================================================
@@ -155,6 +182,9 @@ try {
 # ============================================================================
 Write-Host "-> [3/8] 下载 Node.js..." -ForegroundColor Cyan
 $nodeDir = "$BuildDir\node"
+if (Test-Path "$nodeDir\node.exe") {
+    Write-Host "  [OK] 已有 Node.js $((& "$nodeDir\node.exe" --version 2>$null))，跳过下载" -ForegroundColor Green
+} else {
 try {
     $nodeArch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
     # npmmirror 目录页是动态渲染，直接查 index.json 获取最新 v22 版本号
@@ -172,12 +202,16 @@ try {
     Remove-Item "$BuildDir\node-extract" -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "  [OK] Node.js $($asset.version)（npmmirror）" -ForegroundColor Green
 } catch { Write-Host "  [!] Node.js 下载失败：$($_.Exception.Message)（浏览器工具将不可用，可稍后手动安装）" -ForegroundColor Yellow }
+}
 
 # ============================================================================
 # 4. 下载 ffmpeg
 # ============================================================================
 Write-Host "-> [4/8] 下载 ffmpeg..." -ForegroundColor Cyan
 $ffmpegDir = "$BuildDir\ffmpeg"
+if (Test-Path "$ffmpegDir\ffmpeg.exe") {
+    Write-Host "  [OK] 已有 ffmpeg，跳过下载" -ForegroundColor Green
+} else {
 try {
     $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
     if (Invoke-WithMirror -Url $ffmpegUrl -OutFile "$env:TEMP\ffmpeg.zip" -TimeoutSec 300) {
@@ -189,12 +223,16 @@ try {
         Write-Host "  [OK] ffmpeg" -ForegroundColor Green
     } else { Write-Host "  [!] ffmpeg 下载失败" -ForegroundColor Yellow }
 } catch { Write-Host "  [!] ffmpeg 跳过" -ForegroundColor Yellow }
+}
 
 # ============================================================================
 # 4b. 下载 ripgrep（与在线安装 Ensure-RgFfmpeg 保持一致）
 # ============================================================================
 Write-Host "-> 下载 ripgrep..." -ForegroundColor Cyan
 $rgDir = "$BuildDir\rg"
+if (Test-Path "$rgDir\rg.exe") {
+    Write-Host "  [OK] 已有 ripgrep $((& "$rgDir\rg.exe" --version 2>$null | Select-Object -First 1))，跳过下载" -ForegroundColor Green
+} else {
 try {
     $rgArch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
     $rgUrl = "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-${rgArch}-pc-windows-msvc.zip"
@@ -207,21 +245,26 @@ try {
         Write-Host "  [OK] ripgrep 14.1.1" -ForegroundColor Green
     } else { Write-Host "  [!] ripgrep 下载失败" -ForegroundColor Yellow }
 } catch { Write-Host "  [!] ripgrep 跳过" -ForegroundColor Yellow }
+}
 
 # ============================================================================
 # 5. 克隆 Hermes 源码 + 检测版本
 # ============================================================================
 Write-Host "-> [5/8] 克隆 Hermes 源码..." -ForegroundColor Cyan
 $hermesSrc = "$BuildDir\hermes-agent"
-if (Test-Path $hermesSrc) { Remove-Item $hermesSrc -Recurse -Force }
-# 先试直连，失败后才走代理。
-git clone --depth 1 "https://github.com/NousResearch/hermes-agent.git" $hermesSrc 2>$null
-if ($LASTEXITCODE -ne 0) {
-    git clone --depth 1 "${Mirror}https://github.com/NousResearch/hermes-agent.git" $hermesSrc 2>$null
-}
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$hermesSrc\pyproject.toml")) {
-    Write-Host "  [X] Hermes 源码克隆失败，无法继续" -ForegroundColor Red
-    exit 1
+if (Test-Path "$hermesSrc\.git") {
+    Write-Host "  [OK] 已有 Hermes 源码快照，跳过克隆" -ForegroundColor Green
+} else {
+    if (Test-Path $hermesSrc) { Remove-Item $hermesSrc -Recurse -Force }
+    # 先试直连，失败后才走代理。
+    git clone --depth 1 "https://github.com/NousResearch/hermes-agent.git" $hermesSrc 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        git clone --depth 1 "${Mirror}https://github.com/NousResearch/hermes-agent.git" $hermesSrc 2>$null
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$hermesSrc\pyproject.toml")) {
+        Write-Host "  [X] Hermes 源码克隆失败，无法继续" -ForegroundColor Red
+        exit 1
+    }
 }
 $hermesVersion = "(unknown)"
 # 从 pyproject.toml 读取版本号（main.py 前 10 行不含版本）
@@ -239,6 +282,10 @@ Write-Host "  [OK] Hermes $hermesVersion" -ForegroundColor Green
 Write-Host "-> [6/8] 下载 Python 依赖..." -ForegroundColor Cyan
 $wheelsDir = "$BuildDir\wheels"
 New-Item -ItemType Directory -Force -Path $wheelsDir | Out-Null
+$existingWheels = @(Get-ChildItem $wheelsDir -Filter "*.whl" -ErrorAction SilentlyContinue)
+if ($existingWheels.Count -gt 0) {
+    Write-Host "  [OK] 已有 $($existingWheels.Count) 个 wheels，跳过下载" -ForegroundColor Green
+} else {
 Push-Location $hermesSrc
 if (Test-Path "$uvDir\uv.exe") {
     & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed 2>$null
@@ -260,6 +307,7 @@ if (Test-Path "$uvDir\uv.exe") {
     Write-Host "  [!] uv 未下载，跳过 Python 依赖" -ForegroundColor Yellow
 }
 Pop-Location
+}
 $wheelCount = (Get-ChildItem $wheelsDir -Filter "*.whl" | Measure-Object).Count
 Write-Host "  [OK] $wheelCount wheels" -ForegroundColor Green
 
@@ -267,6 +315,11 @@ Write-Host "  [OK] $wheelCount wheels" -ForegroundColor Green
 # 6b. 打包 Python 3.11 运行时（离线机器无法联网下载解释器）
 # ============================================================================
 Write-Host "-> 打包 Python 3.11 运行时..." -ForegroundColor Cyan
+$cachedPy = Get-ChildItem "$BuildDir\python" -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending | Select-Object -First 1
+if ($cachedPy) {
+    Write-Host "  [OK] 已有 Python 运行时 $($cachedPy.Name)，跳过" -ForegroundColor Green
+} else {
 $pyInstallBase = "$env:LOCALAPPDATA\uv\python"
 $pyRuntimeDir = $null
 if (Test-Path $pyInstallBase) {
@@ -289,6 +342,7 @@ if ($pyRuntimeDir) {
     Write-Host "  [X] 未找到 uv 管理的 Python 3.11 运行时，离线包无法构建" -ForegroundColor Red
     exit 1
 }
+}
 
 # ============================================================================
 # 7. 下载 npm 缓存
@@ -296,6 +350,10 @@ if ($pyRuntimeDir) {
 Write-Host "-> [7/8] 下载 npm 依赖..." -ForegroundColor Cyan
 $npmCacheDir = "$BuildDir\npm-cache"
 New-Item -ItemType Directory -Force -Path $npmCacheDir | Out-Null
+$npmCacheCount = @(Get-ChildItem $npmCacheDir -Force -ErrorAction SilentlyContinue).Count
+if ($npmCacheCount -gt 0) {
+    Write-Host "  [OK] 已有 npm 缓存，跳过下载" -ForegroundColor Green
+} else {
 Push-Location $hermesSrc
 if (Test-Path "$nodeDir\node.exe") {
     $env:Path = "$nodeDir;${env:Path}"
@@ -310,6 +368,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Pop-Location
 Write-Host "  [OK] npm cache" -ForegroundColor Green
+}
 
 # ============================================================================
 # 8. 打包
@@ -480,10 +539,9 @@ $packageFile = "$OutputDir\hermes-install-cn-v${hermesVersion}.zip"
 if (Test-Path $packageFile) { Remove-Item $packageFile -Force }
 Compress-Archive -Path "$PkgDir\*" -DestinationPath $packageFile
 
-# 清理临时文件
-Remove-Item $BuildDir -Recurse -Force -ErrorAction SilentlyContinue
-
+# 保留构建缓存（增量构建复用），不删除 BuildDir
 $pkgSize = "{0:N1}" -f ((Get-Item $packageFile).Length / 1MB)
 Write-Host "`n[OK] 离线包已生成: $packageFile ($pkgSize MB)" -ForegroundColor Green
 Write-Host "Hermes 版本: $hermesVersion" -ForegroundColor Cyan
+Write-Host "构建缓存保留在: $BuildDir （下次构建自动复用，-Force 可全量重建）" -ForegroundColor DarkGray
 Write-Host "上传到 Gitee Releases 或百度网盘即可分发。" -ForegroundColor Yellow

@@ -1,4 +1,3 @@
+# 离线包构建产物与缓存（不提交到仓库）
 packages/
-node_modules/
-.vs/
-*.user
+cache/
