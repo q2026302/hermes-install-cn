@@ -77,12 +77,12 @@ function Invoke-WithMirror {
 
 # 包装原生命令（git/npm/uv）：PowerShell 5.1 在 EAP=Stop 下会把原生命令
 # 写入 stderr 的正常输出（git 的 "Cloning into..."、npm/uv 的进度信息）
-# 当成致命错误抛出。临时放宽 EAP，用返回的退出码判断真实成败。
+# 当成致命错误抛出。临时放宽 EAP，吞掉 stdout+stderr，只返回真实退出码。
 function Invoke-NativeChecked {
     param([scriptblock]$ScriptBlock)
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $ScriptBlock 2>$null
+    $null = & $ScriptBlock 2>$null
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prev
     return $code
@@ -338,7 +338,9 @@ if (Test-Path "$uvDir\uv.exe") {
     }
     $pyFindRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python find 3.11 }
     if ($pyFindRc -ne 0) {
-        Write-Host "  [X] Python 3.11 不可用（uv 安装失败，退出码 $pyInstallRc）" -ForegroundColor Red
+        Write-Host "  [X] Python 3.11 不可用（install exit=$pyInstallRc, find exit=$pyFindRc），详情：" -ForegroundColor Red
+        & "$uvDir\uv.exe" python find 3.11 2>&1 |
+            ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
         Pop-Location
         exit 1
     }
