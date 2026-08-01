@@ -70,10 +70,13 @@ GitHub 代理仅作为直连失败后的兜底，不改变官方脚本的仓库�
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\build-package.ps1
+.\build-package.ps1        # 增量构建：已有缓存自动复用
+.\build-package.ps1 -Force # 强制全量重建
 ```
 
 输出目录：`packages/`，文件名为 `hermes-install-cn-v{版本号}.zip`。
+
+**增量构建**：已下载的组件缓存在 `cache\build\` 下（uv/Git/Node/源码/wheels 等），重复运行或网络中断后重跑会自动复用，只补缺失部分，避免全量重新下载。
 
 打包内容：uv、完整 PortableGit（含 Git Bash）、Node.js、ripgrep、ffmpeg、**Python 3.11 运行时**、Hermes 源码、Python wheels（清华 PyPI）、npm cache。
 
