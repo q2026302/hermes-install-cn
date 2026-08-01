@@ -20,17 +20,29 @@
 
 ## 🚀 在线安装
 
-下载 `install.ps1` 后，在 PowerShell 中运行：
+### 仓库地址（双镜像）
+
+| 平台 | 地址 | 说明 |
+|------|------|------|
+| GitHub | `https://github.com/q2026302/hermes-install-cn` | 主仓库，实时更新 |
+| Gitee | `https://gitee.com/q2026302/hermes-install-cn` | 国内镜像，自动同步，国内访问更快 |
+
+### 一键安装（国内推荐 Gitee）
+
+```powershell
+# 方式一：Gitee 一行执行（国内直连，推荐）
+irm https://gitee.com/q2026302/hermes-install-cn/raw/master/install.ps1 | iex
+
+# 方式二：GitHub 一行执行（需能访问 GitHub）
+irm https://raw.githubusercontent.com/q2026302/hermes-install-cn/master/install.ps1 | iex
+```
+
+或下载 `install.ps1` 后本地运行：
 
 ```powershell
 # 允许执行脚本（当前进程临时放开）
 Set-ExecutionPolicy -Scope Process Bypass
-
-# 方式一：下载后本地运行（推荐，国内可达）
 .\install.ps1
-
-# 方式二：直接一行执行（需要能访问 raw.githubusercontent.com）
-irm https://raw.githubusercontent.com/q2026302/hermes-install-cn/master/install.ps1 | iex
 ```
 
 安装过程 5-15 分钟，完成后**重启终端**，输入 `hermes` 即可使用。
