@@ -358,12 +358,36 @@ if (Test-Path "$uvDir\uv.exe") {
     }
     $env:VIRTUAL_ENV = "$env:TEMP\hermes-venv"
     $env:Path = "$env:TEMP\hermes-venv\Scripts;${env:Path}"
-    # Hermes 只有 pyproject.toml（无 requirements.txt），按需选择依赖清单
-    $depFile = if (Test-Path "$hermesSrc\requirements.txt") { "requirements.txt" } else { "pyproject.toml" }
-    Write-Host "  [~] 依赖清单：$depFile" -ForegroundColor Cyan
-    # uv pip 没有 download 子命令，改用 venv 内的 pip download
-    # （pip 23.1+ 支持 -r pyproject.toml 的 PEP 621 解析）
     $pyExe = "$env:TEMP\hermes-venv\Scripts\python.exe"
+    # Hermes 无 requirements.txt：用内置 tomllib 从 pyproject.toml 提取
+    # [project].dependencies（== 精确 pin）；pip download 会自行解析传递依赖。
+    # （pip 不支持 -r pyproject.toml，uv pip 也没有 download 子命令）
+    $depFile = "$env:TEMP\hermes-requirements.txt"
+    if (Test-Path "$hermesSrc\requirements.txt") {
+        Copy-Item "$hermesSrc\requirements.txt" $depFile -Force
+    } else {
+        $extractPy = "$env:TEMP\extract-hermes-deps.py"
+        @'
+import tomllib, sys
+with open(sys.argv[1], "rb") as f:
+    data = tomllib.load(f)
+deps = data.get("project", {}).get("dependencies", [])
+for d in deps:
+    print(d)
+'@ | Out-File -FilePath $extractPy -Encoding ascii
+        $prevEap3 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $deps = & $pyExe $extractPy "$hermesSrc\pyproject.toml" 2>$null
+        $ErrorActionPreference = $prevEap3
+        if (-not $deps) {
+            Write-Host "  [X] 无法从 pyproject.toml 提取依赖" -ForegroundColor Red
+            Pop-Location
+            exit 1
+        }
+        $deps | Out-File -FilePath $depFile -Encoding utf8
+        Remove-Item $extractPy -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "  [~] 依赖清单：$depFile（$((Get-Content $depFile | Measure-Object -Line).Lines) 项）" -ForegroundColor Cyan
     if (-not (Test-Path "$env:TEMP\hermes-venv\Scripts\pip.exe")) {
         Write-Host "  [~] venv 内补装 pip（走清华 PyPI）..." -ForegroundColor Cyan
         Invoke-NativeChecked { & "$uvDir\uv.exe" pip install pip } | Out-Null
