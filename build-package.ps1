@@ -253,7 +253,26 @@ try {
 Write-Host "-> [5/8] 克隆 Hermes 源码..." -ForegroundColor Cyan
 $hermesSrc = "$BuildDir\hermes-agent"
 if (Test-Path "$hermesSrc\.git") {
-    Write-Host "  [OK] 已有 Hermes 源码快照，跳过克隆" -ForegroundColor Green
+    # 已有快照：自动更新到最新（直连 pull → 代理 fetch 兜底）
+    # 更新失败不阻断打包，保留旧快照继续
+    Write-Host "  [~] 已有 Hermes 源码，更新到最新..." -ForegroundColor Cyan
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    git -C $hermesSrc pull --ff-only 2>&1 | Out-Null
+    $updateRc = $LASTEXITCODE
+    if ($updateRc -ne 0) {
+        git -C $hermesSrc fetch "${Mirror}https://github.com/NousResearch/hermes-agent.git" main 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            git -C $hermesSrc reset --hard FETCH_HEAD 2>&1 | Out-Null
+            $updateRc = $LASTEXITCODE
+        }
+    }
+    $ErrorActionPreference = $prevEap
+    if ($updateRc -eq 0) {
+        Write-Host "  [OK] Hermes 源码已更新到最新" -ForegroundColor Green
+    } else {
+        Write-Host "  [!] 源码更新失败（网络问题），使用缓存快照继续打包" -ForegroundColor Yellow
+    }
 } else {
     if (Test-Path $hermesSrc) { Remove-Item $hermesSrc -Recurse -Force }
     # 先试直连，失败后才走代理。
