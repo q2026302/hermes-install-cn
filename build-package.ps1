@@ -458,8 +458,10 @@ if (-not $pyRuntimeDir) {
 }
 if ($pyRuntimeDir) {
     New-Item "$BuildDir\python" -ItemType Directory -Force | Out-Null
-    Copy-Item $pyRuntimeDir.FullName "$BuildDir\python\" -Recurse -Force
-    Write-Host "  [OK] Python 运行时 $($pyRuntimeDir.Name)" -ForegroundColor Green
+    # $pyRuntimeDir 可能是字符串路径（Split-Path）或 DirectoryInfo（Get-ChildItem），
+    # Copy-Item 两者都接受；不要用 .FullName（字符串没有该属性）
+    Copy-Item $pyRuntimeDir "$BuildDir\python\" -Recurse -Force
+    Write-Host "  [OK] Python 运行时 $pyRuntimeDir" -ForegroundColor Green
 } else {
     Write-Host "  [X] 未找到 uv 管理的 Python 3.11 运行时（uv find 也无结果），离线包无法构建" -ForegroundColor Red
     exit 1
