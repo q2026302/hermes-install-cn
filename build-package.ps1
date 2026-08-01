@@ -322,11 +322,17 @@ Push-Location $hermesSrc
 if (Test-Path "$uvDir\uv.exe") {
     # 确保 uv 管理的 Python 3.11 可用：本地没有则联网下载。
     # 注意 UV_DEFAULT_INDEX 只影响 pip 包索引，解释器下载是另一条链路
-    # （python-build-standalone，GitHub Releases），需用 UV_PYTHON_INSTALL_MIRROR 走代理。
-    $env:UV_PYTHON_INSTALL_MIRROR = "${Mirror}https://github.com/astral-sh/python-build-standalone/releases/download"
+    # （python-build-standalone）。国内优先走 npmmirror 全量镜像（无需代理），
+    # 失败再回退 GitHub 代理，最后官方直连。
+    $env:UV_PYTHON_INSTALL_MIRROR = "https://registry.npmmirror.com/-/binary/python-build-standalone"
     $pyInstallRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 }
     if ($pyInstallRc -ne 0) {
-        # 镜像不可用时回退官方直连再试一次
+        Write-Host "  [!] npmmirror 解释器镜像失败，回退 GitHub 代理..." -ForegroundColor Yellow
+        $env:UV_PYTHON_INSTALL_MIRROR = "${Mirror}https://github.com/astral-sh/python-build-standalone/releases/download"
+        $pyInstallRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 }
+    }
+    if ($pyInstallRc -ne 0) {
+        Write-Host "  [!] 代理也失败，最后尝试官方直连..." -ForegroundColor Yellow
         Remove-Item Env:UV_PYTHON_INSTALL_MIRROR -ErrorAction SilentlyContinue
         $pyInstallRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 }
     }

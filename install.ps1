@@ -185,11 +185,20 @@ function Ensure-ManagedPython {
     $findExitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousEap
     if (-not $pythonPath) {
-        Write-Step "未找到 Python 3.11，使用 uv 安装..."
+        Write-Step "未找到 Python 3.11，使用 uv 安装（npmmirror 镜像优先，无需代理）..."
+        # 解释器下载（python-build-standalone）与 pip 包索引是两条链路：
+        # npmmirror 有全量镜像，直连；失败再回退 GitHub 代理，最后官方直连。
+        $env:UV_PYTHON_INSTALL_MIRROR = "https://registry.npmmirror.com/-/binary/python-build-standalone"
         $prev = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         & uv python install 3.11 2>&1 | ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
         $installExitCode = $LASTEXITCODE
+        if ($installExitCode -ne 0) {
+            Write-Step "npmmirror 解释器镜像失败，回退 GitHub 代理..."
+            $env:UV_PYTHON_INSTALL_MIRROR = "https://gh-proxy.com/https://github.com/astral-sh/python-build-standalone/releases/download"
+            & uv python install 3.11 2>&1 | ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
+            $installExitCode = $LASTEXITCODE
+        }
         $ErrorActionPreference = $prev
         $previousEap = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
