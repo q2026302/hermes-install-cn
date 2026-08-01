@@ -358,10 +358,25 @@ if (Test-Path "$uvDir\uv.exe") {
     }
     $env:VIRTUAL_ENV = "$env:TEMP\hermes-venv"
     $env:Path = "$env:TEMP\hermes-venv\Scripts;${env:Path}"
+    # Hermes 只有 pyproject.toml（无 requirements.txt），按需选择依赖清单
+    $depFile = if (Test-Path "$hermesSrc\requirements.txt") { "requirements.txt" } else { "pyproject.toml" }
+    Write-Host "  [~] 依赖清单：$depFile" -ForegroundColor Cyan
     # 先试清华 PyPI 镜像（直连）
-    Invoke-NativeChecked { & "$uvDir\uv.exe" pip download -r requirements.txt --destination $wheelsDir --index-url $env:PIP_INDEX_URL } | Out-Null
-    if ((Get-ChildItem $wheelsDir -Filter "*.whl" | Measure-Object).Count -eq 0) {
-        Write-Host "  [X] 从清华 PyPI 下载 Python 依赖失败" -ForegroundColor Red
+    $pipRc = Invoke-NativeChecked { & "$uvDir\uv.exe" pip download -r $depFile --destination $wheelsDir --index-url $env:PIP_INDEX_URL }
+    $wheelCountAfter = @(Get-ChildItem $wheelsDir -Filter "*.whl" -ErrorAction SilentlyContinue).Count
+    if ($pipRc -ne 0 -or $wheelCountAfter -eq 0) {
+        # 回退阿里云 PyPI
+        Write-Host "  [!] 清华 PyPI 失败（exit=$pipRc），回退阿里云 PyPI..." -ForegroundColor Yellow
+        $pipRc = Invoke-NativeChecked { & "$uvDir\uv.exe" pip download -r $depFile --destination $wheelsDir --index-url "https://mirrors.aliyun.com/pypi/simple/" }
+        $wheelCountAfter = @(Get-ChildItem $wheelsDir -Filter "*.whl" -ErrorAction SilentlyContinue).Count
+    }
+    if ($pipRc -ne 0 -or $wheelCountAfter -eq 0) {
+        Write-Host "  [X] 从国内 PyPI 下载 Python 依赖失败（exit=$pipRc），详情：" -ForegroundColor Red
+        $prevEap2 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & "$uvDir\uv.exe" pip download -r $depFile --destination $wheelsDir --index-url $env:PIP_INDEX_URL 2>&1 |
+            ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
+        $ErrorActionPreference = $prevEap2
         Pop-Location
         exit 1
     }
