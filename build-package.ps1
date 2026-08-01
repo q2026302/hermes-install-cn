@@ -441,6 +441,31 @@ Write-Host "+-------------------------------------------------------+" -Foregrou
 Write-Host "|   Hermes Agent 离线安装                                |" -ForegroundColor Magenta
 Write-Host "+-------------------------------------------------------+" -ForegroundColor Magenta
 
+# 0. 校验离线包完整性（SHA256，防传输损坏/篡改）
+Write-Host "-> 校验离线包完整性（SHA256）..." -ForegroundColor Cyan
+if (Test-Path "$OfflineDir\SHA256SUMS.txt") {
+    $checksumFailed = @()
+    Get-Content "$OfflineDir\SHA256SUMS.txt" | ForEach-Object {
+        if ($_ -match '^([0-9A-Fa-f]{64})\s+(.+)$') {
+            $expectedHash = $Matches[1].ToUpper()
+            $checksumRel = $Matches[2]
+            $checksumAbs = Join-Path $OfflineDir $checksumRel
+            if (Test-Path $checksumAbs) {
+                $actualHash = (Get-FileHash -Algorithm SHA256 -Path $checksumAbs).Hash
+                if ($actualHash -ne $expectedHash) { $checksumFailed += $checksumRel }
+            } else { $checksumFailed += $checksumRel }
+        }
+    }
+    if ($checksumFailed.Count -gt 0) {
+        Write-Host "  [X] 以下文件校验失败，离线包可能损坏：$($checksumFailed -join ', ')" -ForegroundColor Red
+        Write-Host "  [X] 请重新下载或比对 packages\*.sha256" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  [OK] 完整性校验通过" -ForegroundColor Green
+} else {
+    Write-Host "  [!] 未找到 SHA256SUMS.txt，跳过完整性校验" -ForegroundColor Yellow
+}
+
 # 1. uv
 $uvDir = "$OfflineDir\bin"
 Copy-Item "$uvDir\uv.exe" "$hermesBin\uv.exe" -Force
@@ -553,14 +578,47 @@ Write-Host "`n[OK] 安装完成！重启终端后输入 hermes 即可使用。" 
 
 $offlineScript | Out-File -FilePath "$PkgDir\install-offline.ps1" -Encoding utf8
 
+# ============================================================================
+# 生成包内关键文件 SHA256 校验清单（离线安装时逐项验证，防传输损坏）
+# ============================================================================
+$checksumLines = @()
+$checksumFiles = @(
+    "bin\uv.exe",
+    "git\cmd\git.exe",
+    "git\bin\bash.exe",
+    "hermes-agent\pyproject.toml"
+)
+if (Test-Path "$PkgDir\node\node.exe") { $checksumFiles += "node\node.exe" }
+if (Test-Path "$PkgDir\rg\rg.exe") { $checksumFiles += "rg\rg.exe" }
+if (Test-Path "$PkgDir\ffmpeg\ffmpeg.exe") { $checksumFiles += "ffmpeg\ffmpeg.exe" }
+$pyExe = Get-ChildItem "$PkgDir\python" -Recurse -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($pyExe) {
+    $checksumFiles += "python\" + $pyExe.FullName.Substring($PkgDir.Length + 1)
+}
+foreach ($rel in $checksumFiles) {
+    $abs = Join-Path $PkgDir $rel
+    if (Test-Path $abs) {
+        $hash = (Get-FileHash -Algorithm SHA256 -Path $abs).Hash
+        $checksumLines += "$hash  $rel"
+    }
+}
+$checksumLines | Out-File -FilePath "$PkgDir\SHA256SUMS.txt" -Encoding ascii
+Write-Host "  [OK] SHA256SUMS.txt（$($checksumLines.Count) 项）" -ForegroundColor Green
+
 # 压缩
 $packageFile = "$OutputDir\hermes-install-cn-v${hermesVersion}.zip"
 if (Test-Path $packageFile) { Remove-Item $packageFile -Force }
 Compress-Archive -Path "$PkgDir\*" -DestinationPath $packageFile
 
+# 打包后生成 zip 自身的 SHA256（下载后验证整包）
+$zipHash = (Get-FileHash -Algorithm SHA256 -Path $packageFile).Hash
+"$zipHash  $([System.IO.Path]::GetFileName($packageFile))" |
+    Out-File -FilePath "$packageFile.sha256" -Encoding ascii
+
 # 保留构建缓存（增量构建复用），不删除 BuildDir
 $pkgSize = "{0:N1}" -f ((Get-Item $packageFile).Length / 1MB)
 Write-Host "`n[OK] 离线包已生成: $packageFile ($pkgSize MB)" -ForegroundColor Green
+Write-Host "      SHA256: $packageFile.sha256" -ForegroundColor Green
 Write-Host "Hermes 版本: $hermesVersion" -ForegroundColor Cyan
 Write-Host "构建缓存保留在: $BuildDir （下次构建自动复用，-Force 可全量重建）" -ForegroundColor DarkGray
 Write-Host "上传到 Gitee Releases 或百度网盘即可分发。" -ForegroundColor Yellow
