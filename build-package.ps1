@@ -320,9 +320,27 @@ if ($existingWheels.Count -gt 0) {
 } else {
 Push-Location $hermesSrc
 if (Test-Path "$uvDir\uv.exe") {
+    # 确保 uv 管理的 Python 3.11 可用：本地没有则联网下载。
+    # 注意 UV_DEFAULT_INDEX 只影响 pip 包索引，解释器下载是另一条链路
+    # （python-build-standalone，GitHub Releases），需用 UV_PYTHON_INSTALL_MIRROR 走代理。
+    $env:UV_PYTHON_INSTALL_MIRROR = "${Mirror}https://github.com/astral-sh/python-build-standalone/releases/download"
+    $pyInstallRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 }
+    if ($pyInstallRc -ne 0) {
+        # 镜像不可用时回退官方直连再试一次
+        Remove-Item Env:UV_PYTHON_INSTALL_MIRROR -ErrorAction SilentlyContinue
+        $pyInstallRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 }
+    }
+    $pyFindRc = Invoke-NativeChecked { & "$uvDir\uv.exe" python find 3.11 }
+    if ($pyFindRc -ne 0) {
+        Write-Host "  [X] Python 3.11 不可用（uv 安装失败，退出码 $pyInstallRc）" -ForegroundColor Red
+        Pop-Location
+        exit 1
+    }
     $venvRc = Invoke-NativeChecked { & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed }
     if ($venvRc -ne 0) {
-        Write-Host "  [X] Python 3.11 虚拟环境创建失败" -ForegroundColor Red
+        Write-Host "  [X] Python 3.11 虚拟环境创建失败，详情：" -ForegroundColor Red
+        & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed 2>&1 |
+            ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
         Pop-Location
         exit 1
     }
