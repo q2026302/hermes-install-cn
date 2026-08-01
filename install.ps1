@@ -23,6 +23,10 @@ param(
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+# 脚本版本：运行日志第一行可核对是否最新（与仓库 git 记录同步更新）
+$scriptVersion = "v6 (2026-08-01: tomllib 提取依赖)"
+Write-Host "hermes-install-cn 安装器 v6 (2026-08-01)" -ForegroundColor DarkGray
+
 if ($Proxy) { $env:HTTP_PROXY = $Proxy; $env:HTTPS_PROXY = $Proxy }
 
 # ============================================================================

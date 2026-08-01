@@ -42,6 +42,9 @@ $OutputDir = "$RootDir\packages"
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+# 脚本版本：运行日志第一行可核对是否最新（与仓库 git 记录同步更新）
+$scriptVersion = "v6 (2026-08-01: tomllib 提取依赖)"
+
 if ($Force) {
     Write-Host "  [ -Force ] 清空构建缓存，全量重建..." -ForegroundColor Yellow
     Get-ChildItem $BuildDir -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -50,6 +53,7 @@ if ($Force) {
 Write-Host "`n+-------------------------------------------------------+" -ForegroundColor Magenta
 Write-Host "|   Hermes 离线安装包构建工具                           |" -ForegroundColor Magenta
 Write-Host "+-------------------------------------------------------+" -ForegroundColor Magenta
+Write-Host "  版本: $scriptVersion" -ForegroundColor DarkGray
 Write-Host "  镜像: npm/Node → npmmirror" -ForegroundColor Cyan
 Write-Host "  镜像: Git for Windows → 清华 mirrors" -ForegroundColor Cyan
 Write-Host "  代理: uv/ffmpeg/Hermes源码 → ${Mirror}" -ForegroundColor Cyan
