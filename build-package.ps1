@@ -42,8 +42,8 @@ $OutputDir = "$RootDir\packages"
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-# 脚本版本：运行日志第一行可核对是否最新（与仓库 git 记录同步更新）
-$scriptVersion = "v6 (2026-08-01: tomllib 提取依赖)"
+# 脚本版本：显示在 banner 标题行，运行时可核对是否最新
+$scriptVersion = "v6"
 
 if ($Force) {
     Write-Host "  [ -Force ] 清空构建缓存，全量重建..." -ForegroundColor Yellow
@@ -51,9 +51,8 @@ if ($Force) {
 }
 
 Write-Host "`n+-------------------------------------------------------+" -ForegroundColor Magenta
-Write-Host "|   Hermes 离线安装包构建工具                           |" -ForegroundColor Magenta
+Write-Host "|   Hermes 离线安装包构建工具 v6                       |" -ForegroundColor Magenta
 Write-Host "+-------------------------------------------------------+" -ForegroundColor Magenta
-Write-Host "  版本: $scriptVersion" -ForegroundColor DarkGray
 Write-Host "  镜像: npm/Node → npmmirror" -ForegroundColor Cyan
 Write-Host "  镜像: Git for Windows → 清华 mirrors" -ForegroundColor Cyan
 Write-Host "  代理: uv/ffmpeg/Hermes源码 → ${Mirror}" -ForegroundColor Cyan
@@ -432,26 +431,37 @@ $cachedPy = Get-ChildItem "$BuildDir\python" -Directory -Filter "cpython-3.11*" 
 if ($cachedPy) {
     Write-Host "  [OK] 已有 Python 运行时 $($cachedPy.Name)，跳过" -ForegroundColor Green
 } else {
-$pyInstallBase = "$env:LOCALAPPDATA\uv\python"
+# 用 uv python find 定位实际解释器目录（兼容自定义 UV_PYTHON_INSTALL_DIR），
+# 不硬编码 %LOCALAPPDATA%\uv\python
+$prevEap4 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$pyFindPath = & "$uvDir\uv.exe" python find 3.11 2>$null | Select-Object -First 1
+$ErrorActionPreference = $prevEap4
 $pyRuntimeDir = $null
-if (Test-Path $pyInstallBase) {
-    $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" |
+if ($pyFindPath) {
+    $pyRuntimeDir = Split-Path -Parent $pyFindPath
+}
+if (-not $pyRuntimeDir -or -not (Test-Path "$pyRuntimeDir\python.exe")) {
+    # 兜底：按 uv 默认/自定义安装目录扫描
+    $pyInstallBase = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
+    $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending | Select-Object -First 1
 }
 if (-not $pyRuntimeDir) {
-    # uv venv 已在上一步创建，理论上解释器必然存在；万一没有则尝试补装
+    # 最后尝试补装一次
     Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 } | Out-Null
-    if (Test-Path $pyInstallBase) {
-        $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" |
-            Sort-Object Name -Descending | Select-Object -First 1
-    }
+    $prevEap4 = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $pyFindPath = & "$uvDir\uv.exe" python find 3.11 2>$null | Select-Object -First 1
+    $ErrorActionPreference = $prevEap4
+    if ($pyFindPath) { $pyRuntimeDir = Split-Path -Parent $pyFindPath }
 }
 if ($pyRuntimeDir) {
     New-Item "$BuildDir\python" -ItemType Directory -Force | Out-Null
     Copy-Item $pyRuntimeDir.FullName "$BuildDir\python\" -Recurse -Force
     Write-Host "  [OK] Python 运行时 $($pyRuntimeDir.Name)" -ForegroundColor Green
 } else {
-    Write-Host "  [X] 未找到 uv 管理的 Python 3.11 运行时，离线包无法构建" -ForegroundColor Red
+    Write-Host "  [X] 未找到 uv 管理的 Python 3.11 运行时（uv find 也无结果），离线包无法构建" -ForegroundColor Red
     exit 1
 }
 }
@@ -611,9 +621,9 @@ if (Test-Path "$OfflineDir\rg\rg.exe") {
     Write-Host "  [OK] ripgrep" -ForegroundColor Green
 }
 
-# 3c. Python 3.11 运行时（放到 uv 默认 Python 安装目录，uv 自动发现）
+# 3c. Python 3.11 运行时（放到 uv Python 安装目录，uv 自动发现；兼容自定义目录）
 if (Test-Path "$OfflineDir\python") {
-    $uvPythonDir = "$env:LOCALAPPDATA\uv\python"
+    $uvPythonDir = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
     New-Item -ItemType Directory -Force -Path $uvPythonDir | Out-Null
     Copy-Item "$OfflineDir\python\*" $uvPythonDir -Recurse -Force
     Write-Host "  [OK] Python 3.11 运行时" -ForegroundColor Green
