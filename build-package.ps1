@@ -344,11 +344,15 @@ if (Test-Path "$uvDir\uv.exe") {
         Pop-Location
         exit 1
     }
-    $venvRc = Invoke-NativeChecked { & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed }
+    # --clear：清掉上次失败残留的半成品 venv（uv 默认目录已存在会报错）
+    $venvRc = Invoke-NativeChecked { & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed --clear }
     if ($venvRc -ne 0) {
-        Write-Host "  [X] Python 3.11 虚拟环境创建失败，详情：" -ForegroundColor Red
-        & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed 2>&1 |
+        Write-Host "  [X] Python 3.11 虚拟环境创建失败（exit=$venvRc），详情：" -ForegroundColor Red
+        $prevEap2 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & "$uvDir\uv.exe" venv "$env:TEMP\hermes-venv" --python 3.11 --python-preference only-managed --clear 2>&1 |
             ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
+        $ErrorActionPreference = $prevEap2
         Pop-Location
         exit 1
     }
