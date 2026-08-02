@@ -191,6 +191,14 @@ hermes-install-cn/
 
 在线安装与离线包默认锁定 Hermes release tag `v2026.7.30`（与工具链版本匹配，可 `-HermesVersion` 指定其他 tag）；离线包文件名带 Hermes 版本号：`hermes-install-cn-v{hermes版本号}.zip`。
 
+### 官方 Release 与本工具版本对应表
+
+| 官方 Release tag | 官方 Hermes 版本 | 本工具离线包文件名 | 说明 |
+|------|------|------|------|
+| `v2026.7.30` | v0.19.1 | `hermes-install-cn-v2026.7.30.zip` | 当前默认锁定版本（Node ≥26，npm ≥12） |
+
+> 官方发布：https://github.com/NousResearch/hermes-agent/releases 。后续官方出新版时，本表沿此格式向下追加。
+
 ---
 
 ## 📜 许可证
