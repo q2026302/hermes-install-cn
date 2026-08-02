@@ -485,13 +485,29 @@ if ($npmCacheCount -gt 0) {
 Push-Location $hermesSrc
 if (Test-Path "$nodeDir\node.exe") {
     $env:Path = "$nodeDir;${env:Path}"
+    $nodeVer = & "$nodeDir\node.exe" --version 2>$null
+    Write-Host "  [~] Node $nodeVer ($(Split-Path $nodeDir -Leaf))" -ForegroundColor Cyan
 }
-$npmRc = Invoke-NativeChecked { npm install --prefer-offline --cache $npmCacheDir }
+# 用 node 直接跑 npm-cli.js，绕开 npm.cmd 的路径推断逻辑
+# （避免 "Could not determine Node.js install directory"）
+$npmCli = "$nodeDir\node_modules\npm\bin\npm-cli.js"
+if (-not (Test-Path $npmCli)) {
+    Write-Host "  [X] 未找到 npm-cli.js: $npmCli（Node 解压不完整？）" -ForegroundColor Red
+    Pop-Location
+    exit 1
+}
+$npmRc = Invoke-NativeChecked { & "$nodeDir\node.exe" $npmCli install --prefer-offline --cache $npmCacheDir }
 if ($npmRc -ne 0) {
-    $npmRc = Invoke-NativeChecked { npm install --cache $npmCacheDir }
+    $npmRc = Invoke-NativeChecked { & "$nodeDir\node.exe" $npmCli install --cache $npmCacheDir }
 }
 if ($npmRc -ne 0) {
-    Write-Host "  [X] npm 依赖安装失败" -ForegroundColor Red
+    Write-Host "  [X] npm 依赖安装失败（exit=$npmRc），详情：" -ForegroundColor Red
+    $prevEap6 = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & "$nodeDir\node.exe" $npmCli install --cache $npmCacheDir 2>&1 |
+        ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
+    $ErrorActionPreference = $prevEap6
+    Pop-Location
     exit 1
 }
 Pop-Location
@@ -701,9 +717,26 @@ Pop-Location
 Push-Location "$hermesHome\hermes-agent"
 if (Test-Path "$OfflineDir\node\node.exe") {
     Write-Host "-> 安装 Node.js 依赖（离线）..." -ForegroundColor Cyan
-    npm install --offline --cache "$OfflineDir\npm-cache" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        npm install --cache "$OfflineDir\npm-cache" 2>$null
+    # 用 node 直接跑 npm-cli.js，绕开 npm.cmd 的路径推断问题
+    $offlineNpmCli = "$OfflineDir\node\node_modules\npm\bin\npm-cli.js"
+    if (-not (Test-Path $offlineNpmCli)) {
+        Write-Host "  [X] 未找到 npm-cli.js（Node 解压不完整？）" -ForegroundColor Red
+        Pop-Location
+        exit 1
+    }
+    $env:Path = "$OfflineDir\node;${env:Path}"
+    & "$OfflineDir\node\node.exe" $offlineNpmCli install --offline --cache "$OfflineDir\npm-cache" 2>&1 |
+        ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+    $npmOfflineRc = $LASTEXITCODE
+    if ($npmOfflineRc -ne 0) {
+        & "$OfflineDir\node\node.exe" $offlineNpmCli install --cache "$OfflineDir\npm-cache" 2>&1 |
+            ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+        $npmOfflineRc = $LASTEXITCODE
+    }
+    if ($npmOfflineRc -ne 0) {
+        Write-Host "  [X] Node.js 依赖安装失败（exit=$npmOfflineRc）" -ForegroundColor Red
+        Pop-Location
+        exit 1
     }
     Write-Host "  [OK]" -ForegroundColor Green
 }
