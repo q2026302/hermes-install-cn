@@ -628,7 +628,12 @@ if (Test-Path "$OfflineDir\python") {
     $uvPythonDir = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
     New-Item -ItemType Directory -Force -Path $uvPythonDir | Out-Null
     Copy-Item "$OfflineDir\python\*" $uvPythonDir -Recurse -Force
-    Write-Host "  [OK] Python 3.11 运行时" -ForegroundColor Green
+    $deployedPy = Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($deployedPy) {
+        Write-Host "  [OK] Python 3.11 运行时 → $uvPythonDir\$($deployedPy.Name)" -ForegroundColor Green
+    } else {
+        Write-Host "  [!] Python 3.11 运行时已复制，但目录名未匹配 cpython-3.11*，请检查" -ForegroundColor Yellow
+    }
 }
 
 # 4. ffmpeg
@@ -645,9 +650,28 @@ Write-Host "  [OK]" -ForegroundColor Green
 # 6. 创建 venv + 安装依赖
 Push-Location "$hermesHome\hermes-agent"
 Write-Host "-> 创建 Python 虚拟环境..." -ForegroundColor Cyan
-uv venv --python 3.11 --python-preference only-managed 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  [X] Python 虚拟环境创建失败（缺少 Python 3.11 运行时？）" -ForegroundColor Red
+$uvBin = "$hermesBin\uv.exe"
+# 先确认 uv 能发现部署的 Python 3.11（managed 目录扫描）
+$prevEap5 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$offlinePyFind = & $uvBin python find 3.11 2>$null | Select-Object -First 1
+$ErrorActionPreference = $prevEap5
+if (-not $offlinePyFind) {
+    Write-Host "  [X] uv 未发现 Python 3.11" -ForegroundColor Red
+    $uvPyDir = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
+    Write-Host "      检查目录: $uvPyDir" -ForegroundColor Red
+    Get-ChildItem $uvPyDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "      - $($_.Name)" -ForegroundColor Red }
+    exit 1
+}
+# --clear：重复安装时清掉残留 venv（uv 默认目录已存在会报错）
+$prevEap5 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $uvBin venv .venv --python 3.11 --python-preference only-managed --clear 2>&1 |
+    ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+$venvRc = $LASTEXITCODE
+$ErrorActionPreference = $prevEap5
+if ($venvRc -ne 0) {
+    Write-Host "  [X] Python 虚拟环境创建失败（exit=$venvRc）" -ForegroundColor Red
     exit 1
 }
 $env:VIRTUAL_ENV = "$hermesHome\hermes-agent\.venv"
