@@ -29,19 +29,21 @@
 
 ### 一键安装（国内推荐 Gitee）
 
-> ⚠️ 注意：请使用下面的"下载到临时文件再执行"方式，**不要用 `irm | iex`**——脚本含中文，需带 BOM 编码才能在 Windows PowerShell 5.1 下正确显示/运行，而 `iex` 会被 BOM 干扰导致解析失败。
+> ⚠️ 注意：脚本含中文，需带 BOM 编码才能在 Windows PowerShell 5.1 下正确运行，因此**不能用 `irm | iex`**（iex 会被 BOM 干扰导致解析失败）。下面用"下载 → 子进程 Bypass 执行"，**全程不需要修改任何授权设置**。
 
 ```powershell
 # 方式一：Gitee（国内直连，推荐）
 $p = "$env:TEMP\hermes-install-cn.ps1"
 irm https://gitee.com/q2026302/hermes-install-cn/raw/master/install.ps1 -OutFile $p
-& $p
+& (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $p
 
 # 方式二：GitHub（需能访问 GitHub）
 $p = "$env:TEMP\hermes-install-cn.ps1"
 irm https://raw.githubusercontent.com/q2026302/hermes-install-cn/master/install.ps1 -OutFile $p
-& $p
+& (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $p
 ```
+
+> `-ExecutionPolicy Bypass` 只对这一次子进程生效，**不会改变你系统的执行策略**，安全无副作用。
 
 或下载 `install.ps1` 后本地运行：
 
