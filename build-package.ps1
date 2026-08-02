@@ -802,9 +802,16 @@ if (Test-Path "$OfflineDir\node.zip") {
 }
 
 # 3b. ripgrep
+# 注意：官方脚本 Resolve-UvCmd 会把 $env:Path 重置为注册表 User+Machine 值，
+# 进程级 PATH 会丢失 → 官方脚本 Get-Command rg 找不到 → 又去 winget 下载。
+# 必须把 rg 目录写入【用户级】PATH 才持久可见。
 if (Test-Path "$OfflineDir\rg\rg.exe") {
     New-Item "$hermesBin\rg" -ItemType Directory -Force | Out-Null
     Copy-Item "$OfflineDir\rg\rg.exe" "$hermesBin\rg\rg.exe" -Force
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath -or $userPath -notlike "*$hermesBin\rg*") {
+        [Environment]::SetEnvironmentVariable("Path", "$hermesBin\rg;$userPath", "User")
+    }
     $env:Path = "$hermesBin\rg;${env:Path}"
     Write-Host "  [OK] ripgrep" -ForegroundColor Green
 }
@@ -841,8 +848,17 @@ if (Test-Path "$OfflineDir\python.tar") {
 }
 
 # 4. ffmpeg
+# 同样写入用户级 PATH（官方脚本会重置进程 PATH）；且复制到 $hermesHome\ffmpeg
+# 稳定位置（$OfflineDir 是解压目录，装完可能被删/移动）
 if (Test-Path "$OfflineDir\ffmpeg\ffmpeg.exe") {
-    $env:Path = "$OfflineDir\ffmpeg;${env:Path}"
+    $ffmpegTarget = "$hermesHome\ffmpeg"
+    New-Item $ffmpegTarget -ItemType Directory -Force | Out-Null
+    Copy-Item "$OfflineDir\ffmpeg\ffmpeg.exe" "$ffmpegTarget\ffmpeg.exe" -Force
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath -or $userPath -notlike "*$ffmpegTarget*") {
+        [Environment]::SetEnvironmentVariable("Path", "$ffmpegTarget;$userPath", "User")
+    }
+    $env:Path = "$ffmpegTarget;${env:Path}"
     Write-Host "  [OK] ffmpeg" -ForegroundColor Green
 }
 
@@ -868,9 +884,13 @@ if (-not (Test-Path "$hermesHome\hermes-agent\pyproject.toml")) {
 # 5b. 源码 git origin 改为本地自引用：官方安装脚本 update 时 fetch/pull 走本地，
 #     秒过且不碰 GitHub（省掉 clone/fetch 这个最慢最不可靠的环节）。
 #     打包时已保证本地 main 分支 = 锁定版本 commit。
+#     先备份原始 origin（打包时源码 .git/config 里保存的 GitHub 地址），
+#     官方安装完成后恢复，保证后续 `hermes update` 能正常更新。
 $gitExe = "$gitTarget\cmd\git.exe"
-& $gitExe -C "$hermesHome\hermes-agent" remote set-url origin "$hermesHome\hermes-agent" 2>$null
-& $gitExe -C "$hermesHome\hermes-agent" branch --set-upstream-to=origin/main main 2>$null
+$hermesRepo = "$hermesHome\hermes-agent"
+$originalOrigin = & $gitExe -C $hermesRepo remote get-url origin 2>$null
+& $gitExe -C $hermesRepo remote set-url origin "$hermesRepo" 2>$null
+& $gitExe -C $hermesRepo branch --set-upstream-to=origin/main main 2>$null
 Write-Host "  [OK] 源码已就位（git origin → 本地，官方脚本不再访问 GitHub）" -ForegroundColor Green
 
 # 6. 离线缓存环境变量（官方脚本联网装依赖时，本地 wheels / npm-cache 优先）
@@ -893,8 +913,14 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  [X] Hermes 官方安装脚本执行失败（exit=$LASTEXITCODE）" -ForegroundColor Red
     exit 1
 }
+# 恢复源码 origin 为原始 GitHub 地址（hermes update 依赖它更新）
+if ($originalOrigin) {
+    & $gitExe -C $hermesRepo remote set-url origin $originalOrigin 2>$null
+    Write-Host "  [OK] git origin 已恢复: $originalOrigin" -ForegroundColor Green
+}
 
 Write-Host "`n[OK] 安装完成！重启终端后输入 hermes 即可使用。" -ForegroundColor Green
+Write-Host "     首次使用: hermes setup 配置 API Key 和模型（本步骤需联网）" -ForegroundColor Cyan
 Write-Host "     （模型 API / 平台网关等仍需联网，依赖走国内镜像加速）" -ForegroundColor DarkGray
 '@
 
