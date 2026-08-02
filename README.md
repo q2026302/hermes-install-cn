@@ -14,7 +14,7 @@
 | 方式 | 说明 | 适用场景 |
 |------|------|----------|
 | **在线安装** | 一键脚本，依赖全部走国内镜像 + GitHub 代理 | 有网但 GitHub 直连慢/失败 |
-| **离线安装** | 打包脚本生成离线包 → 解压 → 运行，全程 0 网络 | 内网/无网络/反复安装 |
+| **离线安装** | 下载离线包 → 解压 → 运行；基础软件本地秒装（0 网络），本体安装/使用仍需联网 | 基础软件下载慢/网络不稳定/反复安装 |
 
 ---
 
@@ -45,7 +45,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```
 
-安装过程 5-15 分钟，完成后**重启终端**，输入 `hermes` 即可使用。
+安装过程 5-15 分钟，完成后**重启终端**。官方安装脚本结束时会**自动弹出配置向导**（填 API Key、选模型），也可以在重启后手动运行 `hermes setup` 配置，然后输入 `hermes` 即可使用。
 
 > ⏱️ **耗时提醒**：在线安装需要联网下载全部依赖，其中 **uv、ffmpeg、Hermes 源码** 这几个组件走 GitHub 代理链（直连 → ghfast.top → gh-proxy.com），**即使有代理也比较慢**（ffmpeg 约 150MB、源码 clone 全历史），可能需要等待较长时间，属正常现象，请勿中断。
 >
@@ -80,17 +80,65 @@ GitHub 代理仅作为直连失败后的兜底，不改变官方脚本的仓库�
 
 ## 📦 离线安装
 
-适合无网络环境或反复安装的场景。
+适合**基础软件下载慢**（GitHub 代理慢）、网络不稳定或需要**反复安装**的场景。
 
-### 0. 下载离线包（百度网盘）
+离线包已打好全部基础软件（uv / PortableGit / Node.js / Python 3.11 / ripgrep / ffmpeg / Hermes 源码 / 依赖缓存），安装时基础软件 **0 网络、本地秒装**；Hermes 本体安装与**日常使用仍需联网**（模型 API、平台网关、`hermes update` 升级），联网部分自动走国内镜像加速。
 
-| 版本 | 下载地址 | 提取码 |
-|------|----------|--------|
-| v2026.7.30 | https://pan.baidu.com/s/17T5j9yhp-dXbJObyt9uUWQ | `nsc6` |
+### 1. 下载离线包（百度网盘）
 
-下载后（可选但推荐）验证整包 SHA256：比对 `packages\hermes-install-cn-v2026.7.30.zip.sha256` 中的哈希。
+| 内容 | 地址 |
+|------|------|
+| 共享目录（含各版本离线包） | https://pan.baidu.com/s/17T5j9yhp-dXbJObyt9uUWQ |
+| 提取码 | `nsc6` |
 
-### 1. 生成离线包（在一台能联网的 Windows 机器上）
+目录内按版本存放离线包，命名格式：`hermes-install-cn-v{版本号}.zip`（如 `hermes-install-cn-v2026.7.30.zip`），**选择与你需要的 Hermes 版本对应的最新包下载**即可。
+
+> 💡 如果目录内同时有多个版本，优先选最新构建的；版本号越大越新。
+
+### 2. 安装（目标机器）
+
+> ✅ 全程**不需要管理员权限**（安装到当前用户目录 `%LOCALAPPDATA%\hermes`），但**必须联网**（本体依赖安装和模型调用都需要）。
+
+**第 1 步：解压** —— 将 zip 解压到任意目录（如 `D:\hermes-install-cn`），得到 `install-offline.ps1` 和若干组件文件。
+
+**第 2 步：放开脚本执行权限** —— 打开 **PowerShell**，执行（只对当前窗口生效，安全）：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
+
+**第 3 步：运行安装脚本**：
+
+```powershell
+cd D:\hermes-install-cn        # 换成你的解压目录
+.\install-offline.ps1
+```
+
+安装过程会依次：校验包完整性 → 部署 uv/Git/Node/Python/ffmpeg（秒级）→ 部署源码 → 调用 Hermes 官方安装脚本完成本体安装（venv/依赖/hermes 命令/PATH，需联网）。看到 `[OK] 安装完成！` 即成功。
+
+**第 4 步：重启终端**，让 PATH 生效。
+
+**第 5 步：配置模型（重要）**：
+
+```powershell
+hermes setup
+```
+
+> ⚠️ **与在线版的差异**：在线版安装完成时**会自动弹出配置向导**（填 API Key / 选模型）；**离线版安装时不自动配置**（非交互模式，避免安装过程卡在提问上），装完后**必须手动运行 `hermes setup`** 完成 API Key 和模型配置才能开始使用。
+
+### 3. 在线 vs 离线 行为对比
+
+| 项目 | 在线安装 | 离线安装 |
+|------|----------|----------|
+| 基础软件来源 | 联网下载（uv/ffmpeg/源码走 GitHub 代理，慢） | 包内自带，本地秒装 |
+| Hermes 源码 | 联网 clone（代理链，慢且偶发失败） | 包内自带，直接本地部署 |
+| 本体依赖安装 | 联网（走国内镜像） | 联网（走国内镜像 + 包内 wheels 优先） |
+| 装完是否自动配置模型 | ✅ 自动弹出配置向导 | ❌ 手动 `hermes setup` |
+| 后续使用（模型/网关/升级） | 联网 | 联网 |
+
+### 4. 生成离线包（可选，供构建/分发）
+
+> 一般用户不需要这一步，直接用百度网盘的现成包即可。以下供**想自己打包/换版本**的联网 Windows 机器使用。
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -122,10 +170,6 @@ Get-FileHash hermes-install-cn-vX.zip
 ```
 
 打包内容：uv、完整 PortableGit（含 Git Bash）、Node.js、ripgrep、ffmpeg、**Python 3.11 运行时**、Hermes 源码、Python wheels（清华 PyPI）、npm cache。
-
-### 2. 离线安装（目标机器）
-
-解压离线包 → 运行包内 `install-offline.ps1`，全程不需要联网。
 
 ---
 
