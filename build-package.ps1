@@ -124,14 +124,24 @@ $env:Path = "${uvDir};${env:Path}"
 
 # ============================================================================
 # 2. 下载 Portable Git
+# 策略：下载自解压 .7z.exe 解压验证后，打包成 git.tar（单个文件，无碎文件）。
+# 构建时保留 $gitDir 供克隆源码用；进包/分发只带 git.tar，离线安装时 tar -xf。
 # ============================================================================
 Write-Host "-> [2/8] 下载 Git..." -ForegroundColor Cyan
 $gitDir = "$BuildDir\git"
+$gitTar = "$BuildDir\git.tar"
+$tarExe = "$env:SystemRoot\System32\tar.exe"
 $gitCachedOk = $false
-if ((Test-Path "$gitDir\cmd\git.exe") -and (Test-Path "$gitDir\bin\bash.exe")) {
-    $env:Path = "$gitDir\cmd;$gitDir\bin;$gitDir\usr\bin;${env:Path}"
-    & "$gitDir\bin\bash.exe" -lc "printf hermes-git-bash-ok" | Out-Null
-    if ($LASTEXITCODE -eq 0) { $gitCachedOk = $true }
+if (Test-Path $gitTar) {
+    # git.tar 已缓存：需要 git.exe 时从 tar 恢复目录
+    if (-not (Test-Path "$gitDir\cmd\git.exe")) {
+        New-Item -ItemType Directory -Path $gitDir -Force | Out-Null
+        & $tarExe -xf $gitTar -C $gitDir 2>&1 | Out-Null
+    }
+    if (Test-Path "$gitDir\cmd\git.exe") {
+        $env:Path = "$gitDir\cmd;$gitDir\bin;$gitDir\usr\bin;${env:Path}"
+        $gitCachedOk = $true
+    }
 }
 if (-not $gitCachedOk) {
     if (Test-Path $gitDir) { Remove-Item $gitDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -152,7 +162,6 @@ if (-not $gitCachedOk) {
     }
     $tmpGit = "$env:TEMP\$assetName"
     Invoke-RestMethod -Uri "${gitIndexUrl}${assetName}" -OutFile $tmpGit -TimeoutSec 300 -ErrorAction Stop
-    Remove-Item $gitDir -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $gitDir -Force | Out-Null
     $extractProc = Start-Process -FilePath $tmpGit `
         -ArgumentList "-o`"$gitDir`"", "-y" `
@@ -165,7 +174,12 @@ if (-not $gitCachedOk) {
     if ($LASTEXITCODE -ne 0) { throw "git.exe 无法执行" }
     & "$gitDir\bin\bash.exe" -lc "printf hermes-git-bash-ok" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Git Bash 兼容性检查失败" }
-    Write-Host "  [OK] Git (${assetName}, Git Bash 可用)" -ForegroundColor Green
+    # 打包成单个 git.tar（无压缩，秒级），进包/分发用
+    # 必须用 Windows 自带 tar.exe：Git Bash 的 /usr/bin/tar 会把 "C:" 当远程主机
+    Remove-Item $gitTar -Force -ErrorAction SilentlyContinue
+    & $tarExe -cf $gitTar -C $gitDir .
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $gitTar)) { throw "git.tar 打包失败" }
+    Write-Host "  [OK] Git (${assetName}, Git Bash 可用, 已打包 git.tar)" -ForegroundColor Green
 } catch {
     Write-Host "  [!] 清华镜像安装失败：$($_.Exception.Message)" -ForegroundColor Yellow
     Write-Host "  [!] 尝试 GitHub 代理..." -ForegroundColor Yellow
@@ -174,7 +188,6 @@ if (-not $gitCachedOk) {
         $tmpGit = "$env:TEMP\$assetName"
         $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.3/$assetName"
         if (-not (Invoke-WithMirror -Url $gitUrl -OutFile $tmpGit -TimeoutSec 300)) { throw "下载失败" }
-        Remove-Item $gitDir -Recurse -Force -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Path $gitDir -Force | Out-Null
         $extractProc = Start-Process -FilePath $tmpGit `
             -ArgumentList "-o`"$gitDir`"", "-y" `
@@ -185,7 +198,10 @@ if (-not $gitCachedOk) {
         $env:Path = "$gitDir\cmd;$gitDir\bin;$gitDir\usr\bin;${env:Path}"
         & "$gitDir\bin\bash.exe" -lc "printf hermes-git-bash-ok" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Git Bash 兼容性检查失败" }
-        Write-Host "  [OK] Git（GitHub 代理，Git Bash 可用）" -ForegroundColor Green
+        Remove-Item $gitTar -Force -ErrorAction SilentlyContinue
+        & $tarExe -cf $gitTar -C $gitDir .
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $gitTar)) { throw "git.tar 打包失败" }
+        Write-Host "  [OK] Git（GitHub 代理，已打包 git.tar）" -ForegroundColor Green
     } catch {
         Write-Host "  [X] Git 安装失败，无法继续：$($_.Exception.Message)" -ForegroundColor Red
         exit 1
@@ -199,20 +215,18 @@ if (-not $gitCachedOk) {
 
 # ============================================================================
 # 3. 下载 Node.js
+# 策略：保留原始 node.zip（单个文件，不碎）。构建时需要 node.exe 跑 npm 时
+# 才解压到 $nodeDir（本地缓存）；进包/分发只带 node.zip，离线安装时再解压。
 # ============================================================================
 Write-Host "-> [3/8] 下载 Node.js..." -ForegroundColor Cyan
 $nodeDir = "$BuildDir\node"
-if (Test-Path "$nodeDir\node.exe") {
-    $cachedNodeVer = & "$nodeDir\node.exe" --version 2>$null
-    $nodeMajorMatch = [regex]::Match($cachedNodeVer, '^v(\d+)\.')
-    $nodeMajorOk = $nodeMajorMatch.Success -and ([int]$nodeMajorMatch.Groups[1].Value -ge 26)
-    if ($nodeMajorOk) {
-        Write-Host "  [OK] 已有 Node.js $cachedNodeVer，跳过下载" -ForegroundColor Green
-    } else {
-        Write-Host "  [~] 缓存 Node $cachedNodeVer 不满足 Hermes 要求（>=26），重新下载 v26..." -ForegroundColor Yellow
-        Remove-Item $nodeDir -Recurse -Force
-    }
-} else {
+$nodeZip = "$BuildDir\node.zip"
+$nodeCachedOk = $false
+if (Test-Path $nodeZip) {
+    $nodeCachedOk = $true
+    Write-Host "  [OK] 已有 node.zip，跳过下载" -ForegroundColor Green
+}
+if (-not $nodeCachedOk) {
 try {
     $nodeArch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
     # npmmirror 目录页是动态渲染，直接查 index.json 获取最新 v26 版本号
@@ -224,12 +238,27 @@ try {
     $zipName = "node-$($asset.version)-win-$nodeArch.zip"
     $nodeUrl = "https://npmmirror.com/mirrors/node/$($asset.version)/$zipName"
     Invoke-RestMethod -Uri $nodeUrl -OutFile "$env:TEMP\node.zip" -TimeoutSec 300 -ErrorAction Stop
-    Expand-Archive "$env:TEMP\node.zip" "$BuildDir\node-extract" -Force
-    $nodeFolder = Get-ChildItem "$BuildDir\node-extract" -Directory | Select-Object -First 1
-    if ($nodeFolder) { Move-Item $nodeFolder.FullName $nodeDir -Force }
-    Remove-Item "$BuildDir\node-extract" -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "  [OK] Node.js $($asset.version)（npmmirror）" -ForegroundColor Green
+    # 验证 zip 有效（解压出 node.exe 即算过），验证后删除目录只留 zip
+    Remove-Item "$BuildDir\node-verify" -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive "$env:TEMP\node.zip" "$BuildDir\node-verify" -Force
+    $nodeFolder = Get-ChildItem "$BuildDir\node-verify" -Directory | Select-Object -First 1
+    if (-not $nodeFolder -or -not (Test-Path "$($nodeFolder.FullName)\node.exe")) { throw "Node.js 压缩包结构无效" }
+    Remove-Item "$BuildDir\node-verify" -Recurse -Force
+    Remove-Item $nodeZip -Force -ErrorAction SilentlyContinue
+    Move-Item "$env:TEMP\node.zip" $nodeZip
+    Write-Host "  [OK] Node.js $($asset.version)（npmmirror，已存 node.zip）" -ForegroundColor Green
 } catch { Write-Host "  [!] Node.js 下载失败：$($_.Exception.Message)（浏览器工具将不可用，可稍后手动安装）" -ForegroundColor Yellow }
+}
+# npm 段需要 node.exe：确保解压出 $nodeDir（本地缓存目录）
+if (Test-Path $nodeZip) {
+    if (-not (Test-Path "$nodeDir\node.exe")) {
+        Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "$BuildDir\node-extract" -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Archive $nodeZip "$BuildDir\node-extract" -Force
+        $nodeFolder = Get-ChildItem "$BuildDir\node-extract" -Directory | Select-Object -First 1
+        if ($nodeFolder) { Move-Item $nodeFolder.FullName $nodeDir -Force }
+        Remove-Item "$BuildDir\node-extract" -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ============================================================================
@@ -435,66 +464,119 @@ Write-Host "  [OK] $wheelCount wheels" -ForegroundColor Green
 
 # ============================================================================
 # 6b. 打包 Python 3.11 运行时（离线机器无法联网下载解释器）
+# 策略：python.tar 是**缓存产物**，只服务于"进包"这一步——离线端不需要它。
+#   已有合法 python.tar → 直接进包，绝不再下载/解包。
+#   没有（首次构建/校验不过）→ 用本机 uv 的 Python 3.11 现打一个。
+#   本机也没有 → 才自动下载（npmmirror 镜像）。
+# 注意：python-build-standalone 的目录名就是 -none 结尾（cpython-3.11.15-...-none
+# 是正常名字！），校验只看"版本号完整"（cpython-3.11.\d+），不要误判 -none。
 # ============================================================================
 Write-Host "-> 打包 Python 3.11 运行时..." -ForegroundColor Cyan
-$cachedPy = Get-ChildItem "$BuildDir\python" -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending | Select-Object -First 1
-if ($cachedPy) {
-    Write-Host "  [OK] 已有 Python 运行时 $($cachedPy.Name)，跳过" -ForegroundColor Green
-} else {
-# 先清掉第 6 步建 venv 时残留的 VIRTUAL_ENV/PATH（否则 uv python find
-# 会优先返回激活 venv 的 Scripts 目录，打包进去的是 pip 而非解释器！）
+$pyTar = "$BuildDir\python.tar"
+$pyTarValid = $false
+if (Test-Path $pyTar) {
+    # 校验缓存 tar 顶层目录名：必须带完整版本号 cpython-3.11.\d+（-none 结尾正常）
+    $topDir = & $tarExe -tf $pyTar 2>$null | Select-Object -First 1
+    if ($topDir -match '^cpython-3\.11\.\d+') {
+        $pyTarValid = $true
+        Write-Host "  [OK] 已有 python.tar（顶层 $topDir），跳过" -ForegroundColor Green
+    } else {
+        Write-Host "  [!] 缓存 python.tar 顶层 '$topDir' 无完整版本号，删除重新打包" -ForegroundColor Yellow
+        Remove-Item $pyTar -Force
+    }
+}
+if (-not $pyTarValid) {
+# ============================================================
+# 定位本机 uv managed Python 3.11（uv python dir 拿绝对根，避免假设路径）
+# ============================================================
 Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
 $env:Path = $env:Path -replace [regex]::Escape("$env:TEMP\hermes-venv\Scripts;"), ""
-# 用 uv python find 定位实际解释器目录（--python-preference only-managed 强制
-# 只找 uv 托管的 managed 解释器，跳过 venv/系统 Python）
-$prevEap4 = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-$pyFindPath = & "$uvDir\uv.exe" python find 3.11 --python-preference only-managed 2>$null | Select-Object -First 1
-$ErrorActionPreference = $prevEap4
-$pyRuntimeDir = $null
-if ($pyFindPath) {
-    $pyRuntimeDir = Split-Path -Parent $pyFindPath
-}
-if (-not $pyRuntimeDir -or -not (Test-Path "$pyRuntimeDir\python.exe")) {
-    # 兜底：按 uv 默认/自定义安装目录扫描
-    $pyInstallBase = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
-    $pyRuntimeDir = Get-ChildItem $pyInstallBase -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending | Select-Object -First 1
-}
-if (-not $pyRuntimeDir) {
-    # 最后尝试补装一次
-    Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 } | Out-Null
-    $prevEap4 = $ErrorActionPreference
+
+function Get-UvPythonDir {
+    $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $pyFindPath = & "$uvDir\uv.exe" python find 3.11 --python-preference only-managed 2>$null | Select-Object -First 1
-    $ErrorActionPreference = $prevEap4
-    if ($pyFindPath) { $pyRuntimeDir = Split-Path -Parent $pyFindPath }
+    $dir = & "$uvDir\uv.exe" python dir 2>$null | Select-Object -First 1
+    $ErrorActionPreference = $prev
+    if ($dir -and (Test-Path $dir)) { return ([string]$dir).TrimEnd('\') }
+    return $null
 }
-if ($pyRuntimeDir) {
-    New-Item "$BuildDir\python" -ItemType Directory -Force | Out-Null
-    # $pyRuntimeDir 可能是字符串路径（Split-Path）或 DirectoryInfo（Get-ChildItem），
-    # Copy-Item 两者都接受；不要用 .FullName（字符串没有该属性）
-    Copy-Item $pyRuntimeDir "$BuildDir\python\" -Recurse -Force
-    Write-Host "  [OK] Python 运行时 $pyRuntimeDir" -ForegroundColor Green
-} else {
-    Write-Host "  [X] 未找到 uv 管理的 Python 3.11 运行时（uv find 也无结果），离线包无法构建" -ForegroundColor Red
+function Find-ManagedPython311 {
+    $root = Get-UvPythonDir
+    if (-not $root) { return $null }
+    # 注意坑：uv 会把 "cpython-3.11-windows-x86_64-none"（无版本号）建成指向
+    # "cpython-3.11.15-windows-x86_64-none" 的符号链接别名（3.11=大版本，3.11.15=物理版）。
+    # 必须打物理目录（带版本号），绝不能打符号链接（tar 跟随链接会打出别名目录名，uv 不认）！
+    $cands = @(Get-ChildItem $root -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^cpython-3\.11\.\d+' })
+    if ($cands.Count -eq 0) {
+        # 极端情况：只有别名（无物理目录），跟随后退选它
+        $cands = @(Get-ChildItem $root -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue)
+    }
+    if ($cands.Count -eq 0) { return $null }
+    $chosen = $cands | Sort-Object Name -Descending | Select-Object -First 1
+    return ([string]$chosen.FullName).TrimEnd('\')
+}
+
+$pyRuntimePath = Find-ManagedPython311
+if (-not $pyRuntimePath) {
+    Write-Host "  [~] 本机没有 Python 3.11，自动下载（npmmirror 镜像）..." -ForegroundColor Cyan
+    $env:UV_PYTHON_INSTALL_MIRROR = "https://registry.npmmirror.com/-/binary/python-build-standalone"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & "$uvDir\uv.exe" python install 3.11 2>&1 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+    $installRc = $LASTEXITCODE
+    if ($installRc -ne 0) {
+        Write-Host "  [!] npmmirror 解释器镜像失败，回退 GitHub 代理..." -ForegroundColor Yellow
+        $env:UV_PYTHON_INSTALL_MIRROR = "https://gh-proxy.com/https://github.com/astral-sh/python-build-standalone/releases/download"
+        & "$uvDir\uv.exe" python install 3.11 2>&1 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+        $installRc = $LASTEXITCODE
+    }
+    $ErrorActionPreference = $prev
+    if ($installRc -ne 0) {
+        Write-Host "  [X] Python 3.11 下载失败（exit=$installRc），离线包无法构建" -ForegroundColor Red
+        exit 1
+    }
+    $pyRuntimePath = Find-ManagedPython311
+}
+if (-not $pyRuntimePath -or -not (Test-Path "$pyRuntimePath\python.exe")) {
+    Write-Host "  [X] 仍找不到 Python 3.11 解释器目录" -ForegroundColor Red
+    $root = Get-UvPythonDir
+    Write-Host "      uv python dir: $root" -ForegroundColor Red
+    if ($root) {
+        Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "      - $($_.Name)" -ForegroundColor Red }
+    }
     exit 1
 }
+# 打包成单个 python.tar（无压缩，秒级；顶层目录为 cpython-3.11.x/）
+# 必须用 Windows 自带 tar.exe（Git Bash 的 tar 会把 "C:" 当远程主机）
+# 用 Push-Location 代替 -C 参数（更稳，不依赖 tar 的路径解析）
+$pyParent = [System.IO.Path]::GetDirectoryName($pyRuntimePath)
+$pyLeaf = [System.IO.Path]::GetFileName($pyRuntimePath)
+Write-Host "  [~] Python 运行时: $pyRuntimePath" -ForegroundColor Cyan
+Remove-Item $pyTar -Force -ErrorAction SilentlyContinue
+Push-Location $pyParent
+& $tarExe -cf $pyTar $pyLeaf
+$tarRc = $LASTEXITCODE
+Pop-Location
+if ($tarRc -ne 0 -or -not (Test-Path $pyTar)) {
+    Write-Host "  [X] python.tar 打包失败（rc=$tarRc，parent=$pyParent，leaf=$pyLeaf）" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  [OK] Python 运行时已打包 python.tar" -ForegroundColor Green
 }
 
 # ============================================================================
 # 7. 下载 npm 缓存
+# 策略：npm install 生成缓存后打包成单个 npm-cache.tar（无压缩），
+# 进包/分发只带 tar，离线安装时再解压。避免几万碎文件进包拖慢打包。
 # ============================================================================
 Write-Host "-> [7/8] 下载 npm 依赖..." -ForegroundColor Cyan
 $npmCacheDir = "$BuildDir\npm-cache"
-New-Item -ItemType Directory -Force -Path $npmCacheDir | Out-Null
-# 只有 _cacache 才算有效缓存（失败时可能只剩 _logs 日志目录，不能当作成功缓存跳过）
-$npmCacheValid = Test-Path "$npmCacheDir\_cacache"
-$npmCacheCount = @(Get-ChildItem $npmCacheDir -Force -ErrorAction SilentlyContinue).Count
-if ($npmCacheValid -and $npmCacheCount -gt 0) {
-    Write-Host "  [OK] 已有 npm 缓存，跳过下载" -ForegroundColor Green
+$npmTar = "$BuildDir\npm-cache.tar"
+if (Test-Path $npmTar) {
+    Write-Host "  [OK] 已有 npm-cache.tar，跳过下载" -ForegroundColor Green
 } else {
+New-Item -ItemType Directory -Force -Path $npmCacheDir | Out-Null
 Push-Location $hermesSrc
 # 清掉上次失败遗留的 node_modules 半成品
 Remove-Item "$hermesSrc\node_modules" -Recurse -Force -ErrorAction SilentlyContinue
@@ -526,7 +608,14 @@ if ($npmRc -ne 0) {
     exit 1
 }
 Pop-Location
-Write-Host "  [OK] npm cache" -ForegroundColor Green
+# 打包 npm 缓存成单个 tar（无压缩；cacache 内容多为已压缩数据，tar 即可）
+Remove-Item $npmTar -Force -ErrorAction SilentlyContinue
+& $tarExe -cf $npmTar -C $BuildDir npm-cache
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $npmTar)) {
+    Write-Host "  [X] npm-cache.tar 打包失败" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  [OK] npm cache（已打包 npm-cache.tar）" -ForegroundColor Green
 }
 
 # ============================================================================
@@ -534,25 +623,61 @@ Write-Host "  [OK] npm cache" -ForegroundColor Green
 # ============================================================================
 Write-Host "-> [8/8] 打包离线安装包..." -ForegroundColor Cyan
 
-# 构建目录结构
+# 构建目录结构（先清空旧 PkgDir，否则旧版残留的 python\、git\、node\ 目录
+# 会和新复制的 python.tar 等并存，zip 里出现重复内容！）
 $PkgDir = "$BuildDir\hermes-install-cn-v${hermesVersion}"
+if (Test-Path $PkgDir) { Remove-Item $PkgDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $PkgDir | Out-Null
 
-# 复制二进制
+# 复制组件（全部为单文件 zip/tar + 少量目录，避免几万碎文件拖慢压缩）
 Copy-Item "$BuildDir\bin" "$PkgDir\" -Recurse -Force
-if (Test-Path $gitDir) { Copy-Item $gitDir "$PkgDir\" -Recurse -Force }
-if (Test-Path $nodeDir) { Copy-Item $nodeDir "$PkgDir\" -Recurse -Force }
+if (Test-Path $gitTar) { Copy-Item $gitTar "$PkgDir\" -Force }
+if (Test-Path $nodeZip) { Copy-Item $nodeZip "$PkgDir\" -Force }
+if (Test-Path $pyTar) { Copy-Item $pyTar "$PkgDir\" -Force }
+if (Test-Path $npmTar) { Copy-Item $npmTar "$PkgDir\" -Force }
 if (Test-Path $ffmpegDir) { Copy-Item $ffmpegDir "$PkgDir\" -Recurse -Force }
 if (Test-Path $rgDir) { Copy-Item $rgDir "$PkgDir\" -Recurse -Force }
-if (Test-Path "$BuildDir\python") { Copy-Item "$BuildDir\python" "$PkgDir\" -Recurse -Force }
 
-# 复制 Hermes 源码
-Copy-Item $hermesSrc "$PkgDir\hermes-agent" -Recurse -Force
-Remove-Item "$PkgDir\hermes-agent\.git" -Recurse -Force -ErrorAction SilentlyContinue
+# Hermes 源码打成单个 hermes-agent.tar。
+# 保留 .git（完整 git 仓库）！离线端把 origin 改成本地路径后，官方安装脚本
+# 检测到有效仓库直接走本地 update，跳过 GitHub clone（最慢最不可靠的环节）。
+# 仅排除 node_modules（由离线端 npm install --offline 从 npm-cache 恢复）。
+# 打包前确保源码 checkout 到锁定版本、本地 main 分支指向当前 commit
+#（官方脚本 update 分支默认 fetch origin main + checkout main）。
+$hermesPkgSrc = "$env:TEMP\hermes-agent-pkg"
+$hermesTar = "$BuildDir\hermes-agent.tar"
+if (Test-Path $hermesPkgSrc) { Remove-Item $hermesPkgSrc -Recurse -Force }
+Push-Location $hermesSrc
+# 已 checkout 到锁定 tag（[5/8] 段）；本地若无 main 分支则创建指向当前 commit
+$curBranch = (& git rev-parse --abbrev-ref HEAD 2>$null | Out-String).Trim()
+if ($curBranch -eq "HEAD") {
+    # detached HEAD（tag 检出）：建本地 main 分支指向当前 commit
+    git branch -f main HEAD 2>$null | Out-Null
+    git checkout -q main 2>$null | Out-Null
+}
+# 工作区必须干净（官方脚本 update 前会 stash，但干净最稳）
+git reset -q --hard HEAD 2>$null | Out-Null
+git clean -qfd 2>$null | Out-Null
+Pop-Location
+robocopy $hermesSrc $hermesPkgSrc /E /XD node_modules /NFL /NDL /NJH /NJS /R:1 /W:1 | Out-Null
+if (-not (Test-Path "$hermesPkgSrc\pyproject.toml")) {
+    Write-Host "  [X] 源码打包失败（robocopy 无输出）" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path "$hermesPkgSrc\.git")) {
+    Write-Host "  [X] 源码打包失败（缺少 .git，官方脚本会重新 clone）" -ForegroundColor Red
+    exit 1
+}
+Remove-Item $hermesTar -Force -ErrorAction SilentlyContinue
+& $tarExe -cf $hermesTar -C $env:TEMP hermes-agent-pkg
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $hermesTar)) {
+    Write-Host "  [X] hermes-agent.tar 打包失败" -ForegroundColor Red
+    exit 1
+}
+Copy-Item $hermesTar "$PkgDir\" -Force
 
-# 复制依赖缓存
+# 复制依赖缓存（wheels 为少量 whl，直接进包）
 Copy-Item $wheelsDir "$PkgDir\" -Recurse -Force
-Copy-Item $npmCacheDir "$PkgDir\" -Recurse -Force
 
 # 复制离线安装脚本
 $offlineScript = @'
@@ -576,6 +701,8 @@ $env:UV_INDEX_URL = $env:PIP_INDEX_URL
 
 New-Item -ItemType Directory -Force -Path $hermesBin | Out-Null
 $env:Path = "${hermesBin};${env:Path}"
+# Windows 自带 tar.exe（Git Bash 的 /usr/bin/tar 会把 "C:" 当远程主机）
+$tarExe = "$env:SystemRoot\System32\tar.exe"
 
 Write-Host "+-------------------------------------------------------+" -ForegroundColor Magenta
 Write-Host "|   Hermes Agent 离线安装                                |" -ForegroundColor Magenta
@@ -611,19 +738,30 @@ $uvDir = "$OfflineDir\bin"
 Copy-Item "$uvDir\uv.exe" "$hermesBin\uv.exe" -Force
 Write-Host "  [OK] uv" -ForegroundColor Green
 
-# 2. Git
-$gitSource = "$OfflineDir\git"
+# 2. Git（git.tar → tar -xf 解压部署）
 $gitTarget = "$hermesHome\git"
-if (-not (Test-Path "$gitSource\cmd\git.exe")) {
-    Write-Host "  [X] 离线包缺少 git\cmd\git.exe" -ForegroundColor Red
+if (Test-Path "$OfflineDir\git.tar") {
+    if (-not (Test-Path "$gitTarget\cmd\git.exe")) {
+        Remove-Item $gitTarget -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $gitTarget | Out-Null
+        & $tarExe -xf "$OfflineDir\git.tar" -C $gitTarget
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [X] git.tar 解压失败" -ForegroundColor Red
+            exit 1
+        }
+    }
+} else {
+    Write-Host "  [X] 离线包缺少 git.tar" -ForegroundColor Red
     exit 1
 }
-if (-not (Test-Path "$gitSource\bin\bash.exe")) {
-    Write-Host "  [X] 离线包缺少 git\bin\bash.exe" -ForegroundColor Red
+if (-not (Test-Path "$gitTarget\cmd\git.exe")) {
+    Write-Host "  [X] 解压后缺少 git\cmd\git.exe" -ForegroundColor Red
     exit 1
 }
-Remove-Item $gitTarget -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item $gitSource $gitTarget -Recurse -Force
+if (-not (Test-Path "$gitTarget\bin\bash.exe")) {
+    Write-Host "  [X] 解压后缺少 git\bin\bash.exe" -ForegroundColor Red
+    exit 1
+}
 $gitPathEntries = @(
     "$gitTarget\cmd",
     "$gitTarget\bin",
@@ -644,9 +782,22 @@ foreach ($entry in $gitPathEntries) {
 [Environment]::SetEnvironmentVariable("Path", ($userPathItems -join ";"), "User")
 Write-Host "  [OK] Git + Git Bash" -ForegroundColor Green
 
-# 3. Node.js
-if (Test-Path "$OfflineDir\node\node.exe") {
-    $env:Path = "$OfflineDir\node;${env:Path}"
+# 3. Node.js（node.zip → 解压，顶层目录处理成 $hermesHome\node）
+if (Test-Path "$OfflineDir\node.zip") {
+    if (-not (Test-Path "$hermesHome\node\node.exe")) {
+        $nodeExtract = "$env:TEMP\hermes-node-extract"
+        Remove-Item $nodeExtract -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Archive "$OfflineDir\node.zip" $nodeExtract -Force
+        $nodeSrc = Get-ChildItem $nodeExtract -Directory | Select-Object -First 1
+        if (-not $nodeSrc -or -not (Test-Path "$($nodeSrc.FullName)\node.exe")) {
+            Write-Host "  [X] node.zip 结构无效" -ForegroundColor Red
+            exit 1
+        }
+        Remove-Item "$hermesHome\node" -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item $nodeSrc.FullName "$hermesHome\node"
+        Remove-Item $nodeExtract -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $env:Path = "$hermesHome\node;${env:Path}"
     Write-Host "  [OK] Node.js" -ForegroundColor Green
 }
 
@@ -658,19 +809,34 @@ if (Test-Path "$OfflineDir\rg\rg.exe") {
     Write-Host "  [OK] ripgrep" -ForegroundColor Green
 }
 
-# 3c. Python 3.11 运行时（放到 uv Python 安装目录，uv 自动发现；兼容自定义目录）
-if (Test-Path "$OfflineDir\python") {
-    $uvPythonDir = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
+# 3c. Python 3.11 运行时（python.tar → 解压到 uv Python 安装目录，uv 自动发现）
+if (Test-Path "$OfflineDir\python.tar") {
+    # 先问 uv 真正的托管 Python 根目录（Local/Roaming 因机器而异，别写死 %LOCALAPPDATA%）
+    $uvRealRoot = & "$hermesBin\uv.exe" python dir 2>$null | Select-Object -First 1
+    $uvPythonDir = if ($uvRealRoot -and (Test-Path $uvRealRoot)) { ([string]$uvRealRoot).TrimEnd('\') }
+                   elseif ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR }
+                   else { "$env:LOCALAPPDATA\uv\python" }
     New-Item -ItemType Directory -Force -Path $uvPythonDir | Out-Null
     # 清掉旧版本/错误残留（避免之前装错的内容和多版本堆积）
     Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
     Remove-Item "$uvPythonDir\Scripts" -Recurse -Force -ErrorAction SilentlyContinue
-    Copy-Item "$OfflineDir\python\*" $uvPythonDir -Recurse -Force
-    $deployedPy = Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    & $tarExe -xf "$OfflineDir\python.tar" -C $uvPythonDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [X] python.tar 解压失败" -ForegroundColor Red
+        exit 1
+    }
+    $deployedPy = Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^cpython-3\.11\.\d+' } |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $deployedPy) {
+        # 兜底：无版本号别名（uv 建的 symlink）也算装上了
+        $deployedPy = Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1
+    }
     if ($deployedPy) {
         Write-Host "  [OK] Python 3.11 运行时 → $uvPythonDir\$($deployedPy.Name)" -ForegroundColor Green
     } else {
-        Write-Host "  [!] Python 3.11 运行时已复制，但目录名未匹配 cpython-3.11*，请检查" -ForegroundColor Yellow
+        Write-Host "  [!] python.tar 解压后未找到 cpython-3.11* 目录，请检查" -ForegroundColor Yellow
     }
 }
 
@@ -680,127 +846,118 @@ if (Test-Path "$OfflineDir\ffmpeg\ffmpeg.exe") {
     Write-Host "  [OK] ffmpeg" -ForegroundColor Green
 }
 
-# 5. Hermes 源码
+# 5. Hermes 源码（hermes-agent.tar → 解压并重命名）
 Write-Host "-> 部署 Hermes 源码..." -ForegroundColor Cyan
-Copy-Item "$OfflineDir\hermes-agent" "$hermesHome\hermes-agent" -Recurse -Force
-Write-Host "  [OK]" -ForegroundColor Green
-
-# 6. 创建 venv + 安装依赖
-Push-Location "$hermesHome\hermes-agent"
-Write-Host "-> 创建 Python 虚拟环境..." -ForegroundColor Cyan
-$uvBin = "$hermesBin\uv.exe"
-# 先确认 uv 能发现部署的 Python 3.11（managed 目录扫描）
-$prevEap5 = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-$offlinePyFind = & $uvBin python find 3.11 2>$null | Select-Object -First 1
-$ErrorActionPreference = $prevEap5
-if (-not $offlinePyFind) {
-    Write-Host "  [X] uv 未发现 Python 3.11" -ForegroundColor Red
-    $uvPyDir = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
-    Write-Host "      检查目录: $uvPyDir" -ForegroundColor Red
-    Get-ChildItem $uvPyDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "      - $($_.Name)" -ForegroundColor Red }
+if (-not (Test-Path "$OfflineDir\hermes-agent.tar")) {
+    Write-Host "  [X] 离线包缺少 hermes-agent.tar" -ForegroundColor Red
     exit 1
 }
-# --clear：重复安装时清掉残留 venv（uv 默认目录已存在会报错）
-$prevEap5 = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-& $uvBin venv .venv --python 3.11 --python-preference only-managed --clear 2>&1 |
-    ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-$venvRc = $LASTEXITCODE
-$ErrorActionPreference = $prevEap5
-if ($venvRc -ne 0) {
-    Write-Host "  [X] Python 虚拟环境创建失败（exit=$venvRc）" -ForegroundColor Red
-    exit 1
-}
-$env:VIRTUAL_ENV = "$hermesHome\hermes-agent\.venv"
-$env:Path = "$hermesHome\hermes-agent\.venv\Scripts;${env:Path}"
-Write-Host "  [OK]" -ForegroundColor Green
-
-Write-Host "-> 安装 Python 依赖（离线）..." -ForegroundColor Cyan
-uv pip install --no-index --find-links "$OfflineDir\wheels" -r requirements.txt 2>$null
+& $tarExe -xf "$OfflineDir\hermes-agent.tar" -C $hermesHome
 if ($LASTEXITCODE -ne 0) {
-    uv pip install --no-index --find-links "$OfflineDir\wheels" -r pyproject.toml 2>$null
-}
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "  [X] Python 依赖安装失败" -ForegroundColor Red
+    Write-Host "  [X] hermes-agent.tar 解压失败" -ForegroundColor Red
     exit 1
 }
-Write-Host "  [OK]" -ForegroundColor Green
-Pop-Location
-
-# 7. npm install（离线）
-Push-Location "$hermesHome\hermes-agent"
-if (Test-Path "$OfflineDir\node\node.exe") {
-    Write-Host "-> 安装 Node.js 依赖（离线）..." -ForegroundColor Cyan
-    # 用 node 直接跑 npm-cli.js，绕开 npm.cmd 的路径推断问题
-    $offlineNpmCli = "$OfflineDir\node\node_modules\npm\bin\npm-cli.js"
-    if (-not (Test-Path $offlineNpmCli)) {
-        Write-Host "  [X] 未找到 npm-cli.js（Node 解压不完整？）" -ForegroundColor Red
-        Pop-Location
-        exit 1
-    }
-    $env:Path = "$OfflineDir\node;${env:Path}"
-    & "$OfflineDir\node\node.exe" $offlineNpmCli install --offline --cache "$OfflineDir\npm-cache" 2>&1 |
-        ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-    $npmOfflineRc = $LASTEXITCODE
-    if ($npmOfflineRc -ne 0) {
-        & "$OfflineDir\node\node.exe" $offlineNpmCli install --cache "$OfflineDir\npm-cache" 2>&1 |
-            ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-        $npmOfflineRc = $LASTEXITCODE
-    }
-    if ($npmOfflineRc -ne 0) {
-        Write-Host "  [X] Node.js 依赖安装失败（exit=$npmOfflineRc）" -ForegroundColor Red
-        Pop-Location
-        exit 1
-    }
-    Write-Host "  [OK]" -ForegroundColor Green
+if (Test-Path "$hermesHome\hermes-agent-pkg") {
+    Remove-Item "$hermesHome\hermes-agent" -Recurse -Force -ErrorAction SilentlyContinue
+    Rename-Item "$hermesHome\hermes-agent-pkg" "hermes-agent"
 }
-Pop-Location
+if (-not (Test-Path "$hermesHome\hermes-agent\pyproject.toml")) {
+    Write-Host "  [X] 源码部署失败（未找到 pyproject.toml）" -ForegroundColor Red
+    exit 1
+}
+# 5b. 源码 git origin 改为本地自引用：官方安装脚本 update 时 fetch/pull 走本地，
+#     秒过且不碰 GitHub（省掉 clone/fetch 这个最慢最不可靠的环节）。
+#     打包时已保证本地 main 分支 = 锁定版本 commit。
+$gitExe = "$gitTarget\cmd\git.exe"
+& $gitExe -C "$hermesHome\hermes-agent" remote set-url origin "$hermesHome\hermes-agent" 2>$null
+& $gitExe -C "$hermesHome\hermes-agent" branch --set-upstream-to=origin/main main 2>$null
+Write-Host "  [OK] 源码已就位（git origin → 本地，官方脚本不再访问 GitHub）" -ForegroundColor Green
+
+# 6. 离线缓存环境变量（官方脚本联网装依赖时，本地 wheels / npm-cache 优先）
+if (Test-Path "$OfflineDir\wheels") { $env:UV_FIND_LINKS = "$OfflineDir\wheels" }
+if (Test-Path "$OfflineDir\npm-cache") {
+    $env:npm_config_cache = "$OfflineDir\npm-cache"
+    $env:npm_config_prefer_offline = "true"
+}
+
+# 7. 调用 Hermes 官方安装脚本完成本体安装（venv / 依赖 / hermes 命令 / PATH / 配置）
+#    官方脚本检测到基础软件已就绪后跳过 prereqs，只跑 install + finalize 段。
+Write-Host "-> 调用 Hermes 官方安装脚本（venv/依赖/hermes 命令）..." -ForegroundColor Cyan
+$officialInstall = "$hermesHome\hermes-agent\scripts\install.ps1"
+if (-not (Test-Path $officialInstall)) {
+    Write-Host "  [X] 未找到官方安装脚本: $officialInstall" -ForegroundColor Red
+    exit 1
+}
+& $officialInstall -NonInteractive
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [X] Hermes 官方安装脚本执行失败（exit=$LASTEXITCODE）" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "`n[OK] 安装完成！重启终端后输入 hermes 即可使用。" -ForegroundColor Green
+Write-Host "     （模型 API / 平台网关等仍需联网，依赖走国内镜像加速）" -ForegroundColor DarkGray
 '@
 
 $offlineScript | Out-File -FilePath "$PkgDir\install-offline.ps1" -Encoding utf8
 
 # ============================================================================
 # 生成包内关键文件 SHA256 校验清单（离线安装时逐项验证，防传输损坏）
-# 并行计算：node/git/ffmpeg 都是大文件，串行 hash 慢，改用 .NET Task 并行
+# 全部为单文件组件（zip/tar/exe），并行计算快；不再遍历碎文件目录
 # ============================================================================
 $checksumFiles = @(
     "bin\uv.exe",
-    "git\cmd\git.exe",
-    "git\bin\bash.exe",
-    "hermes-agent\pyproject.toml"
+    "git.tar",
+    "node.zip",
+    "python.tar",
+    "npm-cache.tar",
+    "hermes-agent.tar"
 )
-if (Test-Path "$PkgDir\node\node.exe") { $checksumFiles += "node\node.exe" }
 if (Test-Path "$PkgDir\rg\rg.exe") { $checksumFiles += "rg\rg.exe" }
 if (Test-Path "$PkgDir\ffmpeg\ffmpeg.exe") { $checksumFiles += "ffmpeg\ffmpeg.exe" }
-# python.exe 定位：uv managed Python 结构为 python\<cpython-xxx>\python.exe
-# 直接拼接路径，避免 -Recurse 遍历整个解释器目录（几千个小文件很慢）
-$pyDir = Get-ChildItem "$PkgDir\python" -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if ($pyDir -and (Test-Path "$($pyDir.FullName)\python.exe")) {
-    $checksumFiles += "python\$($pyDir.Name)\python.exe"
-}
 
-# 并行 SHA256（PS 5.1 兼容：System.Threading.Tasks + 闭包捕获路径）
+# 并行 SHA256（PS 5.1 兼容）。
+# 坑1：Task.Run 后台线程无 PowerShell Runspace，scriptblock 无法执行；
+# 坑2：Start-ThreadJob 老 PS 5.1 没这个模块。
+# 正解：RunspacePool（内核 API，PS 5.1 必有），每文件一个管道并行哈希。
 $absFiles = @($checksumFiles | ForEach-Object { Join-Path $PkgDir $_ } | Where-Object { Test-Path $_ })
-$hashTasks = foreach ($fileAbs in $absFiles) {
-    $p = $fileAbs
-    [System.Threading.Tasks.Task]::Run([Func[string]]{
-        $stream = [System.IO.File]::OpenRead($p)
-        try {
-            $sha256 = [System.Security.Cryptography.SHA256]::Create()
-            try { $bytes = $sha256.ComputeHash($stream) }
-            finally { $sha256.Dispose() }
-            return [BitConverter]::ToString($bytes).Replace('-', '')
-        } finally { $stream.Dispose() }
-    })
-}
-[System.Threading.Tasks.Task]::WaitAll($hashTasks)
-$checksumLines = for ($i = 0; $i -lt $hashTasks.Count; $i++) {
-    $rel = $absFiles[$i].Substring($PkgDir.Length + 1)
-    "$($hashTasks[$i].Result)  $rel"
+try {
+    $pool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+    $pool.Open()
+    $jobs = foreach ($fileAbs in $absFiles) {
+        $ps = [powershell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddScript({
+            param($p)
+            $stream = [System.IO.File]::OpenRead($p)
+            try {
+                $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                try { $b = $sha256.ComputeHash($stream) }
+                finally { $sha256.Dispose() }
+                [BitConverter]::ToString($b).Replace('-', '')
+            } finally { $stream.Dispose() }
+        }).AddArgument($fileAbs)
+        [pscustomobject]@{ Ps = $ps; Async = $ps.BeginInvoke(); Path = $fileAbs }
+    }
+    $hashByRel = @{}
+    foreach ($j in $jobs) {
+        $hash = $j.Ps.EndInvoke($j.Async)[0]
+        $rel = $j.Path.Substring($PkgDir.Length + 1)
+        $hashByRel[$rel] = $hash
+        $j.Ps.Dispose()
+    }
+    $pool.Dispose()
+    $checksumLines = foreach ($rel in $checksumFiles) {
+        if ($hashByRel.ContainsKey($rel)) { "$($hashByRel[$rel])  $rel" }
+    }
+} catch {
+    # 并行失败不阻断构建：回退串行 Get-FileHash
+    Write-Host "  [!] 并行哈希失败，回退串行：$($_.Exception.Message)" -ForegroundColor Yellow
+    $checksumLines = foreach ($rel in $checksumFiles) {
+        $abs = Join-Path $PkgDir $rel
+        if (Test-Path $abs) {
+            "$((Get-FileHash -Algorithm SHA256 -Path $abs).Hash)  $rel"
+        }
+    }
 }
 $checksumLines | Out-File -FilePath "$PkgDir\SHA256SUMS.txt" -Encoding ascii
 Write-Host "  [OK] SHA256SUMS.txt（$($checksumLines.Count) 项，并行计算）" -ForegroundColor Green
