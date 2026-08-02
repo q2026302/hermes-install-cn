@@ -29,12 +29,18 @@
 
 ### 一键安装（国内推荐 Gitee）
 
-```powershell
-# 方式一：Gitee 一行执行（国内直连，推荐）
-irm https://gitee.com/q2026302/hermes-install-cn/raw/master/install.ps1 | iex
+> ⚠️ 注意：请使用下面的"下载到临时文件再执行"方式，**不要用 `irm | iex`**——脚本含中文，需带 BOM 编码才能在 Windows PowerShell 5.1 下正确显示/运行，而 `iex` 会被 BOM 干扰导致解析失败。
 
-# 方式二：GitHub 一行执行（需能访问 GitHub）
-irm https://raw.githubusercontent.com/q2026302/hermes-install-cn/master/install.ps1 | iex
+```powershell
+# 方式一：Gitee（国内直连，推荐）
+$p = "$env:TEMP\hermes-install-cn.ps1"
+irm https://gitee.com/q2026302/hermes-install-cn/raw/master/install.ps1 -OutFile $p
+& $p
+
+# 方式二：GitHub（需能访问 GitHub）
+$p = "$env:TEMP\hermes-install-cn.ps1"
+irm https://raw.githubusercontent.com/q2026302/hermes-install-cn/master/install.ps1 -OutFile $p
+& $p
 ```
 
 或下载 `install.ps1` 后本地运行：
