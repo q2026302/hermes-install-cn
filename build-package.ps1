@@ -3,6 +3,9 @@
 # 在一台能联网的 Windows 机器上运行，自动生成离线安装包
 # 用法: .\build-package.ps1
 #
+# 版本策略：Hermes 各版本的依赖要求不同（如 node 门槛 22→26），
+# 默认锁定 release tag（-HermesVersion 可覆盖，如 v2026.7.30 / master）。
+#
 # 增量构建：已下载的组件缓存在 cache\build\ 下，重复运行或网络中断后
 # 重跑会自动复用已有成果，只补缺失部分。加 -Force 强制全量重建。
 #
@@ -13,6 +16,7 @@
 # ============================================================================
 param(
     [switch]$Force,
+    [string]$HermesVersion = "v2026.7.30",
     [string]$Mirror = "https://gh-proxy.com/",
     [string]$NpmRegistry = "https://registry.npmmirror.com",
     [string]$NodeMirror = "https://npmmirror.com/mirrors/node/",
@@ -199,16 +203,24 @@ if (-not $gitCachedOk) {
 Write-Host "-> [3/8] 下载 Node.js..." -ForegroundColor Cyan
 $nodeDir = "$BuildDir\node"
 if (Test-Path "$nodeDir\node.exe") {
-    Write-Host "  [OK] 已有 Node.js $((& "$nodeDir\node.exe" --version 2>$null))，跳过下载" -ForegroundColor Green
+    $cachedNodeVer = & "$nodeDir\node.exe" --version 2>$null
+    $nodeMajorMatch = [regex]::Match($cachedNodeVer, '^v(\d+)\.')
+    $nodeMajorOk = $nodeMajorMatch.Success -and ([int]$nodeMajorMatch.Groups[1].Value -ge 26)
+    if ($nodeMajorOk) {
+        Write-Host "  [OK] 已有 Node.js $cachedNodeVer，跳过下载" -ForegroundColor Green
+    } else {
+        Write-Host "  [~] 缓存 Node $cachedNodeVer 不满足 Hermes 要求（>=26），重新下载 v26..." -ForegroundColor Yellow
+        Remove-Item $nodeDir -Recurse -Force
+    }
 } else {
 try {
     $nodeArch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
-    # npmmirror 目录页是动态渲染，直接查 index.json 获取最新 v22 版本号
-    # （latest-v22.x/node-v22-win-x64.zip 这类通配文件名不存在）
+    # npmmirror 目录页是动态渲染，直接查 index.json 获取最新 v26 版本号
+    # （Hermes 0.19.1 要求 node>=26.0.0, npm>=12.0.0；v22 已不满足）
     $index = Invoke-RestMethod -Uri "https://registry.npmmirror.com/-/binary/node/index.json" -TimeoutSec 60 -ErrorAction Stop
-    $asset = $index | Where-Object { $_.version -match '^v22\.' } |
+    $asset = $index | Where-Object { $_.version -match '^v26\.' } |
         Sort-Object { [version]($_.version -replace '^v', '') } -Descending | Select-Object -First 1
-    if (-not $asset) { throw "npmmirror 中未找到 Node.js 22" }
+    if (-not $asset) { throw "npmmirror 中未找到 Node.js 26" }
     $zipName = "node-$($asset.version)-win-$nodeArch.zip"
     $nodeUrl = "https://npmmirror.com/mirrors/node/$($asset.version)/$zipName"
     Invoke-RestMethod -Uri $nodeUrl -OutFile "$env:TEMP\node.zip" -TimeoutSec 300 -ErrorAction Stop
@@ -266,50 +278,49 @@ try {
 # ============================================================================
 # 5. 克隆 Hermes 源码 + 检测版本
 # ============================================================================
-Write-Host "-> [5/8] 克隆 Hermes 源码..." -ForegroundColor Cyan
+Write-Host "-> [5/8] 克隆 Hermes 源码（锁定 $HermesVersion）..." -ForegroundColor Cyan
 $hermesSrc = "$BuildDir\hermes-agent"
+$hermesRepo = "https://github.com/NousResearch/hermes-agent.git"
+$hermesRepoMirror = "${Mirror}$hermesRepo"
 if (Test-Path "$hermesSrc\.git") {
-    # 已有快照：自动更新到最新（直连 pull → 代理 fetch 兜底）
-    # 更新失败不阻断打包，保留旧快照继续
-    Write-Host "  [~] 已有 Hermes 源码，更新到最新..." -ForegroundColor Cyan
+    # 已有快照：切到指定版本（tag），不再跟随 master。
+    # 直连 fetch → 代理 fetch 兜底；失败不阻断，保留旧快照继续。
+    Write-Host "  [~] 已有 Hermes 源码，切到 $HermesVersion..." -ForegroundColor Cyan
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    git -C $hermesSrc pull --ff-only 2>&1 | Out-Null
+    git -C $hermesSrc fetch --depth 1 origin tag $HermesVersion 2>&1 | Out-Null
     $updateRc = $LASTEXITCODE
+    if ($updateRc -eq 0) {
+        git -C $hermesSrc checkout --force $HermesVersion 2>&1 | Out-Null
+        $updateRc = $LASTEXITCODE
+    }
     if ($updateRc -ne 0) {
-        git -C $hermesSrc fetch "${Mirror}https://github.com/NousResearch/hermes-agent.git" main 2>&1 | Out-Null
+        git -C $hermesSrc fetch --depth 1 "$hermesRepoMirror" tag $HermesVersion 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            git -C $hermesSrc reset --hard FETCH_HEAD 2>&1 | Out-Null
+            git -C $hermesSrc checkout --force FETCH_HEAD 2>&1 | Out-Null
             $updateRc = $LASTEXITCODE
         }
     }
     $ErrorActionPreference = $prevEap
     if ($updateRc -eq 0) {
-        Write-Host "  [OK] Hermes 源码已更新到最新" -ForegroundColor Green
+        Write-Host "  [OK] Hermes 源码已就位（$HermesVersion）" -ForegroundColor Green
     } else {
-        Write-Host "  [!] 源码更新失败（网络问题），使用缓存快照继续打包" -ForegroundColor Yellow
+        Write-Host "  [!] 切换 $HermesVersion 失败（网络问题），使用缓存快照继续打包" -ForegroundColor Yellow
     }
 } else {
     if (Test-Path $hermesSrc) { Remove-Item $hermesSrc -Recurse -Force }
-    # 先试直连，失败后才走代理。
-    $cloneRc = Invoke-NativeChecked { git clone --depth 1 "https://github.com/NousResearch/hermes-agent.git" $hermesSrc }
+    # 锁定版本克隆（直连 → 代理）。指定 master 时才克隆主分支。
+    $cloneRef = if ($HermesVersion -eq "master") { $HermesVersion } else { "tag $HermesVersion" }
+    $cloneRc = Invoke-NativeChecked { git clone --depth 1 --branch $HermesVersion $hermesRepo $hermesSrc }
     if ($cloneRc -ne 0) {
-        $cloneRc = Invoke-NativeChecked { git clone --depth 1 "${Mirror}https://github.com/NousResearch/hermes-agent.git" $hermesSrc }
+        $cloneRc = Invoke-NativeChecked { git clone --depth 1 --branch $HermesVersion $hermesRepoMirror $hermesSrc }
     }
     if ($cloneRc -ne 0 -or -not (Test-Path "$hermesSrc\pyproject.toml")) {
-        Write-Host "  [X] Hermes 源码克隆失败，无法继续" -ForegroundColor Red
+        Write-Host "  [X] Hermes 源码克隆失败（$HermesVersion），无法继续" -ForegroundColor Red
         exit 1
     }
 }
-$hermesVersion = "(unknown)"
-# 从 pyproject.toml 读取版本号（main.py 前 10 行不含版本）
-$verFile = "$hermesSrc\pyproject.toml"
-if (Test-Path $verFile) {
-    $content = Get-Content $verFile
-    $verLine = $content -match '^version\s*=\s*"(\d+\.\d+\.\d+)"' | Select-Object -First 1
-    if ($verLine -match '(\d+\.\d+\.\d+)') { $hermesVersion = $Matches[1] }
-}
-Write-Host "  [OK] Hermes $hermesVersion" -ForegroundColor Green
+$hermesVersion = $HermesVersion.TrimStart('v')
 
 # ============================================================================
 # 6. 下载 Python 依赖（wheels）
@@ -478,11 +489,15 @@ if ($pyRuntimeDir) {
 Write-Host "-> [7/8] 下载 npm 依赖..." -ForegroundColor Cyan
 $npmCacheDir = "$BuildDir\npm-cache"
 New-Item -ItemType Directory -Force -Path $npmCacheDir | Out-Null
+# 只有 _cacache 才算有效缓存（失败时可能只剩 _logs 日志目录，不能当作成功缓存跳过）
+$npmCacheValid = Test-Path "$npmCacheDir\_cacache"
 $npmCacheCount = @(Get-ChildItem $npmCacheDir -Force -ErrorAction SilentlyContinue).Count
-if ($npmCacheCount -gt 0) {
+if ($npmCacheValid -and $npmCacheCount -gt 0) {
     Write-Host "  [OK] 已有 npm 缓存，跳过下载" -ForegroundColor Green
 } else {
 Push-Location $hermesSrc
+# 清掉上次失败遗留的 node_modules 半成品
+Remove-Item "$hermesSrc\node_modules" -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path "$nodeDir\node.exe") {
     $env:Path = "$nodeDir;${env:Path}"
     $nodeVer = & "$nodeDir\node.exe" --version 2>$null
@@ -749,8 +764,8 @@ $offlineScript | Out-File -FilePath "$PkgDir\install-offline.ps1" -Encoding utf8
 
 # ============================================================================
 # 生成包内关键文件 SHA256 校验清单（离线安装时逐项验证，防传输损坏）
+# 并行计算：node/git/ffmpeg 都是大文件，串行 hash 慢，改用 .NET Task 并行
 # ============================================================================
-$checksumLines = @()
 $checksumFiles = @(
     "bin\uv.exe",
     "git\cmd\git.exe",
@@ -760,24 +775,43 @@ $checksumFiles = @(
 if (Test-Path "$PkgDir\node\node.exe") { $checksumFiles += "node\node.exe" }
 if (Test-Path "$PkgDir\rg\rg.exe") { $checksumFiles += "rg\rg.exe" }
 if (Test-Path "$PkgDir\ffmpeg\ffmpeg.exe") { $checksumFiles += "ffmpeg\ffmpeg.exe" }
-$pyExe = Get-ChildItem "$PkgDir\python" -Recurse -Filter "python.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($pyExe) {
-    $checksumFiles += "python\" + $pyExe.FullName.Substring($PkgDir.Length + 1)
+# python.exe 定位：uv managed Python 结构为 python\<cpython-xxx>\python.exe
+# 直接拼接路径，避免 -Recurse 遍历整个解释器目录（几千个小文件很慢）
+$pyDir = Get-ChildItem "$PkgDir\python" -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($pyDir -and (Test-Path "$($pyDir.FullName)\python.exe")) {
+    $checksumFiles += "python\$($pyDir.Name)\python.exe"
 }
-foreach ($rel in $checksumFiles) {
-    $abs = Join-Path $PkgDir $rel
-    if (Test-Path $abs) {
-        $hash = (Get-FileHash -Algorithm SHA256 -Path $abs).Hash
-        $checksumLines += "$hash  $rel"
-    }
+
+# 并行 SHA256（PS 5.1 兼容：System.Threading.Tasks + 闭包捕获路径）
+$absFiles = @($checksumFiles | ForEach-Object { Join-Path $PkgDir $_ } | Where-Object { Test-Path $_ })
+$hashTasks = foreach ($fileAbs in $absFiles) {
+    $p = $fileAbs
+    [System.Threading.Tasks.Task]::Run([Func[string]]{
+        $stream = [System.IO.File]::OpenRead($p)
+        try {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            try { $bytes = $sha256.ComputeHash($stream) }
+            finally { $sha256.Dispose() }
+            return [BitConverter]::ToString($bytes).Replace('-', '')
+        } finally { $stream.Dispose() }
+    })
+}
+[System.Threading.Tasks.Task]::WaitAll($hashTasks)
+$checksumLines = for ($i = 0; $i -lt $hashTasks.Count; $i++) {
+    $rel = $absFiles[$i].Substring($PkgDir.Length + 1)
+    "$($hashTasks[$i].Result)  $rel"
 }
 $checksumLines | Out-File -FilePath "$PkgDir\SHA256SUMS.txt" -Encoding ascii
-Write-Host "  [OK] SHA256SUMS.txt（$($checksumLines.Count) 项）" -ForegroundColor Green
+Write-Host "  [OK] SHA256SUMS.txt（$($checksumLines.Count) 项，并行计算）" -ForegroundColor Green
 
-# 压缩
+# 压缩（用 .NET ZipFile 替代 Compress-Archive：PS 5.1 的 Compress-Archive
+# 单线程且逐文件 IO，大包慢 3-5 倍）
 $packageFile = "$OutputDir\hermes-install-cn-v${hermesVersion}.zip"
 if (Test-Path $packageFile) { Remove-Item $packageFile -Force }
-Compress-Archive -Path "$PkgDir\*" -DestinationPath $packageFile
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory($PkgDir, $packageFile,
+    [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
 # 打包后生成 zip 自身的 SHA256（下载后验证整包）
 $zipHash = (Get-FileHash -Algorithm SHA256 -Path $packageFile).Hash

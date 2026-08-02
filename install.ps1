@@ -11,6 +11,7 @@
 #     链: 直连 → gh-proxy.com → ghfast.top
 # ============================================================================
 param(
+    [string]$HermesVersion = "v2026.7.30",
     [string]$NpmRegistry = "https://registry.npmmirror.com",
     [string]$NodeMirror = "https://npmmirror.com/mirrors/node/",
     [string]$ElectronMirror = "https://npmmirror.com/mirrors/electron/",
@@ -128,37 +129,38 @@ function Add-UserPathEntry {
     }
 }
 
-function Test-Node22 {
+function Test-Node26 {
     param([string]$NodeExe)
     if ([string]::IsNullOrWhiteSpace($NodeExe)) { return $false }
     if (-not (Test-Path -LiteralPath $NodeExe)) { return $false }
     try {
         $version = & $NodeExe --version 2>$null
         $v = [version]($version -replace '^v', '')
-        return (($v.Major -eq 20 -and $v.Minor -ge 19) -or ($v.Major -ge 22 -and ($v.Major -gt 22 -or $v.Minor -ge 12)))
+        # Hermes 0.19.1 要求 node>=26.0.0, npm>=12.0.0
+        return ($v.Major -ge 26)
     } catch { return $false }
 }
 
 function Install-ManagedNode {
     $nodeDir = "$managedHermesHome\node"
     $managedNode = "$nodeDir\node.exe"
-    if (Test-Node22 $managedNode) {
+    if (Test-Node26 $managedNode) {
         $env:Path = "$nodeDir;${env:Path}"
         Write-OK "已有 Hermes Node.js $((& $managedNode --version 2>$null))"
         return
     }
     $systemNode = Get-Command node -ErrorAction SilentlyContinue
-    if ($systemNode -and (Test-Node22 $systemNode.Source)) {
+    if ($systemNode -and (Test-Node26 $systemNode.Source)) {
         Write-OK "已有 Node.js $((node --version 2>$null))"
         return
     }
 
-    Write-Step "从 npmmirror 安装 Node.js 22..."
+    Write-Step "从 npmmirror 安装 Node.js 26..."
     $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
     $index = Invoke-RestMethod -Uri "https://registry.npmmirror.com/-/binary/node/index.json" -TimeoutSec 60 -ErrorAction Stop
-    $asset = $index | Where-Object { $_.version -match '^v22\.' } |
+    $asset = $index | Where-Object { $_.version -match '^v26\.' } |
         Sort-Object { [version]($_.version -replace '^v', '') } -Descending | Select-Object -First 1
-    if (-not $asset) { throw "npmmirror 中未找到 Node.js 22" }
+    if (-not $asset) { throw "npmmirror 中未找到 Node.js 26" }
     $zipName = "node-$($asset.version)-win-$arch.zip"
     $zipPath = "$env:TEMP\$zipName"
     $extractDir = "$env:TEMP\hermes-node-extract"
@@ -171,7 +173,7 @@ function Install-ManagedNode {
     Move-Item $sourceDir.FullName $nodeDir
     Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
     Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Node22 $managedNode)) { throw "Node.js 安装后版本检查失败" }
+    if (-not (Test-Node26 $managedNode)) { throw "Node.js 安装后版本检查失败" }
     $env:Path = "$nodeDir;${env:Path}"
     Add-UserPathEntry $nodeDir
     Write-OK "Node.js $((& $managedNode --version 2>$null))（npmmirror）"
@@ -223,7 +225,7 @@ function Prepare-LocalHermesRepository {
         return
     }
 
-    Write-Step "通过 GitHub HTTPS 代理预先克隆 Hermes 源码..."
+    Write-Step "通过 GitHub HTTPS 代理预先克隆 Hermes 源码（锁定 $HermesVersion）..."
     $repoPath = "https://github.com/NousResearch/hermes-agent.git"
     $proxyUrls = @(
         "https://ghfast.top/$repoPath",
@@ -241,13 +243,13 @@ function Prepare-LocalHermesRepository {
                 Move-Item -LiteralPath $InstallDir -Destination $backupDir -ErrorAction Stop
                 Write-Warn "已有不完整源码目录，已移到：$backupDir"
             }
-            git -c windows.appendAtomically=false clone --depth 1 --branch main $cloneUrl $InstallDir 2>&1 |
+            git -c windows.appendAtomically=false clone --depth 1 --branch $HermesVersion $cloneUrl $InstallDir 2>&1 |
                 ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
             if ($LASTEXITCODE -eq 0 -and (Test-Path "$InstallDir\.git\HEAD")) {
                 $cloneSuccess = $true
                 git -C $InstallDir config core.autocrlf false
                 git -C $InstallDir remote set-url origin $cloneUrl
-                Write-OK "Hermes 源码已通过代理克隆，保留完整 Git 信息"
+                Write-OK "Hermes 源码已通过代理克隆（$HermesVersion），保留完整 Git 信息"
             } else {
                 Write-Warn "该代理克隆失败"
                 if (Test-Path $InstallDir) {

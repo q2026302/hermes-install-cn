@@ -88,7 +88,18 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 输出目录：`packages/`，文件名为 `hermes-install-cn-v{版本号}.zip`。
 
-**增量构建**：已下载的组件缓存在 `cache\build\` 下（uv/Git/Node/源码/wheels 等），重复运行或网络中断后重跑会自动复用，只补缺失部分，避免全量重新下载。Hermes 源码缓存命中时会自动 `git pull` 更新到最新。
+**版本锁定**：Hermes 各版本对依赖的要求不同（如 Node.js 门槛 22 → 26），脚本默认锁定 release tag `v2026.7.30`（与工具链版本匹配），不跟随 master。可用 `-HermesVersion` 指定其他 tag（或 `master`）：
+
+```powershell
+# 在线安装指定版本
+irm https://gitee.com/q2026302/hermes-install-cn/raw/master/install.ps1 | iex  # 默认 v2026.7.30
+.\install.ps1 -HermesVersion v2026.6.19
+
+# 离线打包指定版本
+.\build-package.ps1 -HermesVersion v2026.6.19
+```
+
+**增量构建**：已下载的组件缓存在 `cache\build\` 下（uv/Git/Node/源码/wheels 等），重复运行或网络中断后重跑会自动复用，只补缺失部分，避免全量重新下载。源码缓存命中时会自动切换到指定版本（不再跟随 master）。
 
 **完整性校验**：打包会生成 `SHA256SUMS.txt`（包内关键组件校验，离线安装时自动逐项验证）和 `packages\*.zip.sha256`（整包校验，下载后人工验证）：
 
