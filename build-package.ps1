@@ -431,11 +431,15 @@ $cachedPy = Get-ChildItem "$BuildDir\python" -Directory -Filter "cpython-3.11*" 
 if ($cachedPy) {
     Write-Host "  [OK] 已有 Python 运行时 $($cachedPy.Name)，跳过" -ForegroundColor Green
 } else {
-# 用 uv python find 定位实际解释器目录（兼容自定义 UV_PYTHON_INSTALL_DIR），
-# 不硬编码 %LOCALAPPDATA%\uv\python
+# 先清掉第 6 步建 venv 时残留的 VIRTUAL_ENV/PATH（否则 uv python find
+# 会优先返回激活 venv 的 Scripts 目录，打包进去的是 pip 而非解释器！）
+Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+$env:Path = $env:Path -replace [regex]::Escape("$env:TEMP\hermes-venv\Scripts;"), ""
+# 用 uv python find 定位实际解释器目录（--python-preference only-managed 强制
+# 只找 uv 托管的 managed 解释器，跳过 venv/系统 Python）
 $prevEap4 = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-$pyFindPath = & "$uvDir\uv.exe" python find 3.11 2>$null | Select-Object -First 1
+$pyFindPath = & "$uvDir\uv.exe" python find 3.11 --python-preference only-managed 2>$null | Select-Object -First 1
 $ErrorActionPreference = $prevEap4
 $pyRuntimeDir = $null
 if ($pyFindPath) {
@@ -452,7 +456,7 @@ if (-not $pyRuntimeDir) {
     Invoke-NativeChecked { & "$uvDir\uv.exe" python install 3.11 } | Out-Null
     $prevEap4 = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $pyFindPath = & "$uvDir\uv.exe" python find 3.11 2>$null | Select-Object -First 1
+    $pyFindPath = & "$uvDir\uv.exe" python find 3.11 --python-preference only-managed 2>$null | Select-Object -First 1
     $ErrorActionPreference = $prevEap4
     if ($pyFindPath) { $pyRuntimeDir = Split-Path -Parent $pyFindPath }
 }
@@ -627,6 +631,9 @@ if (Test-Path "$OfflineDir\rg\rg.exe") {
 if (Test-Path "$OfflineDir\python") {
     $uvPythonDir = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { "$env:LOCALAPPDATA\uv\python" }
     New-Item -ItemType Directory -Force -Path $uvPythonDir | Out-Null
+    # 清掉旧版本/错误残留（避免之前装错的内容和多版本堆积）
+    Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+    Remove-Item "$uvPythonDir\Scripts" -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item "$OfflineDir\python\*" $uvPythonDir -Recurse -Force
     $deployedPy = Get-ChildItem $uvPythonDir -Directory -Filter "cpython-3.11*" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($deployedPy) {
