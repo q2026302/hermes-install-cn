@@ -47,6 +47,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 安装过程 5-15 分钟，完成后**重启终端**，输入 `hermes` 即可使用。
 
+> ⏱️ **耗时提醒**：在线安装需要联网下载全部依赖，其中 **uv、ffmpeg、Hermes 源码** 这几个组件走 GitHub 代理链（直连 → ghfast.top → gh-proxy.com），**即使有代理也比较慢**（ffmpeg 约 150MB、源码 clone 全历史），可能需要等待较长时间，属正常现象，请勿中断。
+>
+> 💡 如果网络条件差或需要反复安装，推荐直接使用下面的**离线安装包**（百度网盘下载，基础软件已打好包，安装时不再走 GitHub）。
+
 ### 安装器做了什么
 
 在线安装器先准备好全部依赖，再原样调用 Hermes 官方安装脚本（不修改官方逻辑），官方脚本检测到依赖已就绪后直接复用：
@@ -56,7 +60,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 | uv | GitHub 代理链下载 | 官方脚本复用 |
 | Python 3.11 | `uv python install 3.11` | 官方脚本复用 |
 | PortableGit + Git Bash | 清华镜像下载，自解压 | 完整版，含 bash/awk/sed，官方脚本复用 |
-| Node.js 22 | npmmirror 镜像（index.json 解析真实版本） | 官方脚本复用 |
+| Node.js 26 | npmmirror 镜像（index.json 解析真实版本） | 官方脚本复用 |
 | Hermes 源码 | ghfast.top → gh-proxy.com HTTPS 预克隆 | 保留完整 Git 历史，官方脚本进入更新分支 |
 | ripgrep / ffmpeg | GitHub 代理链预装 | 官方脚本检测到后跳过 winget |
 | npm / PyPI / uv 索引 | 镜像环境变量（当前进程 + 用户级持久化） | 后续 `hermes update` 等继续生效 |
@@ -77,6 +81,14 @@ GitHub 代理仅作为直连失败后的兜底，不改变官方脚本的仓库�
 ## 📦 离线安装
 
 适合无网络环境或反复安装的场景。
+
+### 0. 下载离线包（百度网盘）
+
+| 版本 | 下载地址 | 提取码 |
+|------|----------|--------|
+| v2026.7.30 | https://pan.baidu.com/s/17T5j9yhp-dXbJObyt9uUWQ | `nsc6` |
+
+下载后（可选但推荐）验证整包 SHA256：比对 `packages\hermes-install-cn-v2026.7.30.zip.sha256` 中的哈希。
 
 ### 1. 生成离线包（在一台能联网的 Windows 机器上）
 
@@ -133,7 +145,7 @@ hermes-install-cn/
 
 ## 🔖 版本
 
-在线安装始终获取 Hermes 最新 main 分支；离线包文件名带 Hermes 版本号：`hermes-install-cn-v{hermes版本号}.zip`。
+在线安装与离线包默认锁定 Hermes release tag `v2026.7.30`（与工具链版本匹配，可 `-HermesVersion` 指定其他 tag）；离线包文件名带 Hermes 版本号：`hermes-install-cn-v{hermes版本号}.zip`。
 
 ---
 
